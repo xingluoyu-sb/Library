@@ -34,6 +34,9 @@ object EnStrings {
         "文件是空的" to "The file is empty",
         "这份备份需要口令" to "This backup needs a passphrase",
         "上次恢复没有完成" to "The last restore didn't finish",
+        "资料库恢复了，但里面的密码是另一台手机的密钥加密的，这台机器打不开" to
+            "The library was restored, but its passwords were encrypted with another phone's key, " +
+            "so they can't be opened on this device.",
         "新库已经写进去了，但密钥没接上，现在密码都打不开。可以退回恢复之前的资料库。" to
             "The new database was written, but its key was never wired up, so no password opens right now. " +
             "You can roll back to the library from before the restore.",

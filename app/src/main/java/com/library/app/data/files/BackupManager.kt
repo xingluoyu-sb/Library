@@ -11,6 +11,7 @@ import android.os.Process
 import android.provider.MediaStore
 import androidx.annotation.WorkerThread
 import com.library.app.data.crypto.BackupCodec
+import com.library.app.data.crypto.CryptoBox
 import com.library.app.data.crypto.DataKey
 import com.library.app.data.db.AppDatabase
 import com.library.app.data.db.Schema
@@ -43,6 +44,8 @@ class BackupManager(
     private val dataKey: DataKey,
     private val fileStore: FileStore,
 ) {
+
+    private val box = CryptoBox(context)
 
     sealed interface Export {
         data class Ok(val name: String) : Export
@@ -248,6 +251,12 @@ class BackupManager(
             // entries 还是 v1: 密文，写成 2 会让读取和迁移两条路一起死掉
             val sourceVersion = cryptoVersionOf(source)
 
+            // 老明文 .db 里没有 DEK，`v1:` 密文只有「当初那台设备」的 Keystore 密钥能解。
+            // 抽样几条试一下：全解不开就别报「恢复成功」，那等于骗用户密码还在
+            val foreignSecrets = dek == null &&
+                sourceVersion == DataKey.VERSION_LEGACY &&
+                !legacySecretsReadable(source)
+
             // ① 先把「新库里的 DEK 能不能被本机接管」验掉。
             //    这一步失败时原库一个字节都没动，用户还能照常用旧数据
             val adoption = dek?.let { raw ->
@@ -281,6 +290,11 @@ class BackupManager(
             }
 
             _pendingRollback.value = false
+            if (foreignSecrets) {
+                return@withContext Restore.Partial(
+                    "资料库恢复了，但里面的密码是另一台手机的密钥加密的，这台机器打不开".tr(),
+                )
+            }
             if (sourceVersion == DataKey.VERSION_LEGACY) {
                 return@withContext Restore.Partial(
                     "资料库恢复了，但里面的密码还是旧格式，需要重新迁移一次；" +
@@ -337,6 +351,26 @@ class BackupManager(
             }
         }
     }
+
+    /**
+     * 抽样最多 3 条 `v1:` 密文，看本机 Keystore 能不能解开其中任意一条。
+     *
+     * 一条都解不开 → 这批密文是别的设备加的，恢复之后密码等于全废，必须告诉用户。
+     * 一条都没有 → 没什么可掉，算「没问题」。
+     */
+    private fun legacySecretsReadable(dbFile: File): Boolean = runCatching {
+        val samples = ArrayList<String>(3)
+        SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            db.rawQuery(
+                "SELECT secret_ct FROM entries WHERE secret_ct IS NOT NULL AND secret_ct <> '' LIMIT 3",
+                null,
+            ).use { cursor ->
+                while (cursor.moveToNext()) samples.add(cursor.getString(0))
+            }
+        }
+        if (samples.isEmpty()) return@runCatching true
+        samples.any { ct -> runCatching { box.decrypt(ct) }.isSuccess }
+    }.getOrDefault(false)
 
     /**
      * 源库的 crypto_version。表不存在（v7 及更早的库）或者读不出人话的值，
