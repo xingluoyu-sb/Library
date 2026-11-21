@@ -82,6 +82,8 @@ fun SettingsScreen(
     var hint by remember { mutableStateOf<String?>(null) }
     var pendingRestore by remember { mutableStateOf<android.net.Uri?>(null) }
     var restored by remember { mutableStateOf(false) }
+    // 恢复成功但有话要说（密码模块没迁完 / 密码是别的设备加的密）
+    var restoreNote by remember { mutableStateOf<String?>(null) }
     var trashCount by remember { mutableStateOf(0) }
     var cropSource by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var editingNickname by remember { mutableStateOf(false) }
@@ -423,7 +425,14 @@ fun SettingsScreen(
                 scope.launch {
                     backupBusy = true
                     when (val outcome = backupManager.restoreFrom(uri, pass)) {
-                        BackupManager.Restore.Ok -> restored = true
+                        BackupManager.Restore.Ok -> {
+                            restoreNote = null
+                            restored = true
+                        }
+                        is BackupManager.Restore.Partial -> {
+                            restoreNote = outcome.reason
+                            restored = true
+                        }
                         is BackupManager.Restore.Failed ->
                             backupMessage = "恢复失败：${outcome.reason}".tr()
                     }
@@ -477,7 +486,12 @@ fun SettingsScreen(
         androidx.compose.material3.AlertDialog(
             onDismissRequest = {},
             title = { Text("恢复完成".tr()) },
-            text = { Text("数据已替换，需要重启应用才能读取。".tr()) },
+            text = {
+                Text(
+                    restoreNote
+                        ?: "数据已替换，需要重启应用才能读取。".tr(),
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { BackupManager.restart(context) }) { Text("立即重启".tr()) }
             },

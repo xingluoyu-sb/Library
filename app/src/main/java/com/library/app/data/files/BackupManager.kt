@@ -12,6 +12,7 @@ import android.provider.MediaStore
 import com.library.app.data.crypto.BackupCodec
 import com.library.app.data.crypto.DataKey
 import com.library.app.data.db.AppDatabase
+import com.library.app.data.db.Schema
 import com.library.app.i18n.tr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -47,6 +48,13 @@ class BackupManager(
 
     sealed interface Restore {
         data object Ok : Restore
+
+        /**
+         * 库换成功了，但有件事必须告诉用户：密码模块还没迁完，或者密码是别的设备加的密。
+         * 这不是失败，重启之后资料条目都是好的，只有密码要额外处理。
+         */
+        data class Partial(val reason: String) : Restore
+
         data class Failed(val reason: String) : Restore
     }
 
@@ -182,10 +190,14 @@ class BackupManager(
 
             validate(source)?.let { return@withContext Restore.Failed(it) }
 
+            // 源库是几版，恢复后就得是几版。在没迁完的库上导出的备份，
+            // entries 还是 v1: 密文，写成 2 会让读取和迁移两条路一起死掉
+            val sourceVersion = cryptoVersionOf(source)
+
             // ① 先把「新库里的 DEK 能不能被本机接管」验掉。
             //    这一步失败时原库一个字节都没动，用户还能照常用旧数据
             val adoption = dek?.let { raw ->
-                runCatching { dataKey.prepareAdoption(raw) }.getOrElse { error ->
+                runCatching { dataKey.prepareAdoption(raw, sourceVersion) }.getOrElse { error ->
                     return@withContext Restore.Failed(error.restoreReason())
                 }
             }
@@ -211,6 +223,13 @@ class BackupManager(
                     } else {
                         "没能写入新库（${error.brief()}），原库也没能还原；请重启应用后再恢复一次".tr()
                     },
+                )
+            }
+
+            if (sourceVersion == DataKey.VERSION_LEGACY) {
+                return@withContext Restore.Partial(
+                    "资料库恢复了，但里面的密码还是旧格式，需要重新迁移一次；" +
+                        "这些密文如果是另一台手机加密的，这台机器打不开".tr(),
                 )
             }
             Restore.Ok
@@ -263,6 +282,23 @@ class BackupManager(
             }
         }
     }
+
+    /**
+     * 源库的 crypto_version。表不存在（v7 及更早的库）或者读不出人话的值，
+     * 一律当作 [DataKey.VERSION_LEGACY] —— 那是最保守的假设，不会把库标成迁完。
+     *
+     * 刻意不放 [BackupCodec] 里：那个类要能在纯 JVM 单测里跑，不能碰 android.database。
+     */
+    private fun cryptoVersionOf(dbFile: File): Int = runCatching {
+        SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            db.rawQuery(
+                "SELECT crypto_version FROM ${Schema.TABLE_CRYPTO_KEYS} WHERE id = 1",
+                null,
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else DataKey.VERSION_LEGACY }
+        }
+    }.getOrElse { DataKey.VERSION_LEGACY }
+        .takeIf { it == DataKey.VERSION_LEGACY || it == DataKey.VERSION_DEK }
+        ?: DataKey.VERSION_LEGACY
 
     /** 返回 null 表示没问题，否则是给人看的原因。 */
     private fun validate(file: File): String? = runCatching {

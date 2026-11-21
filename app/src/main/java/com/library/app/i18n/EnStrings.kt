@@ -37,6 +37,9 @@ object EnStrings {
         "不像是资料库的备份" to "This doesn't look like a library backup",
         "口令不对，或者备份已经损坏" to "Wrong passphrase, or the backup is damaged",
         "密码存储还没完成迁移，这次没有保存" to "Password storage hasn't finished migrating, so nothing was saved",
+        "资料库恢复了，但里面的密码还是旧格式，需要重新迁移一次；这些密文如果是另一台手机加密的，这台机器打不开" to
+            "The library was restored, but its passwords are still in the old format and need one more migration. " +
+            "If those were encrypted on another phone, this one can't open them.",
         // 数据密钥
         "这台设备上的数据密钥已经失效，之前加密的密码解不开了。请用之前导出的加密备份恢复（设置 → 数据与备份）。" to
             "The data key on this phone is gone, so saved passwords can no longer be decrypted. " +

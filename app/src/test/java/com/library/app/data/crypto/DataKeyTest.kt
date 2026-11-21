@@ -79,4 +79,25 @@ class DataKeyTest {
             assertEquals(false, called)
         }
     }
+
+    /**
+     * 恢复备份时写回的版本号必须跟源库一致。
+     * 源库版本 1（迁移没跑完时导出的备份）恢复后仍要是 1，否则：
+     * 读取路径要求 `v2:` 前缀 → 全部报「密文是旧格式」，迁移入口又因「已是 2」直接返回。
+     */
+    @Test
+    fun adoptedVersionFollowsSource() {
+        assertEquals(DataKey.VERSION_LEGACY, DataKey.adoptedVersion(DataKey.VERSION_LEGACY))
+        assertEquals(DataKey.VERSION_DEK, DataKey.adoptedVersion(DataKey.VERSION_DEK))
+    }
+
+    @Test
+    fun adoptedVersionRejectsUnknownVersion() {
+        try {
+            DataKey.adoptedVersion(7)
+            fail("不认识的版本号也放过去了")
+        } catch (e: IllegalArgumentException) {
+            assertEquals(true, e.message!!.contains("7"))
+        }
+    }
 }

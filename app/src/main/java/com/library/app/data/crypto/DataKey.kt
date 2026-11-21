@@ -33,8 +33,18 @@ class DataKey(
     private val database: AppDatabase,
 ) {
 
-    /** 恢复备份时用的「已经包好的 DEK」，必须在覆盖原库之前拿到。 */
-    class Adoption internal constructor(internal val wrapped: String)
+    /**
+     * 恢复备份时用的「已经包好的 DEK」，必须在覆盖原库之前拿到。
+     *
+     * [sourceVersion] 是**源库**的 crypto_version，恢复后要原样写回去：
+     * 备份是在迁移还没跑完的库上导出的（版本 1、entries 还是 `v1:` 密文），
+     * 恢复时若一律写成 2，读取路径就会要求 `v2:` 前缀而整片报错，
+     * 迁移入口又会因为「已经是 2」直接返回，通道永久关闭。
+     */
+    class Adoption internal constructor(
+        internal val wrapped: String,
+        val sourceVersion: Int,
+    )
 
     /** 本机拿不到数据密钥，且库已经迁移到 DEK 版本：只能靠备份恢复。 */
     class DekUnavailable(message: String) : Exception(message)
@@ -98,15 +108,16 @@ class DataKey(
      * 失败就在这里返回，原库一个字节都没动。包好之后落库只剩一条 INSERT，失败面小得多。
      */
     @WorkerThread
-    fun prepareAdoption(dek: ByteArray): Adoption {
+    fun prepareAdoption(dek: ByteArray, sourceVersion: Int): Adoption {
         require(dek.size == DEK_SIZE) { "数据密钥长度不对" }
+        val version = adoptedVersion(sourceVersion)
         if (box.ensureKey() == CryptoBox.KeyState.FAILED) {
             throw DekUnavailable(UNAVAILABLE_KEYSTORE.tr())
         }
         val wrapped = runCatching { box.encryptBytes(dek, AAD_DEK) }.getOrElse {
             throw DekUnavailable(UNAVAILABLE_KEYSTORE.tr())
         }
-        return Adoption(wrapped)
+        return Adoption(wrapped, version)
     }
 
     /**
@@ -127,11 +138,12 @@ class DataKey(
             """.trimIndent(),
         )
         // 全项目唯一允许覆盖包裹记录的地方：新库是从别的设备带过来的，
-        // 那行里包的是上一台机器的 DEK，本机永远解不开，接管它就是这里的目的
+        // 那行里包的是上一台机器的 DEK，本机永远解不开，接管它就是这里的目的。
+        // 版本号跟着源库走，见 [Adoption.sourceVersion]：这里写死 2 会把没迁完的库锁死
         db.execSQL(
             "INSERT OR REPLACE INTO ${Schema.TABLE_CRYPTO_KEYS} " +
                 "(id, wrapped_dek, crypto_version, created_at) VALUES (1, ?, ?, ?)",
-            arrayOf<Any>(adoption.wrapped, VERSION_DEK, System.currentTimeMillis()),
+            arrayOf<Any>(adoption.wrapped, adoption.sourceVersion, System.currentTimeMillis()),
         )
         // 密钥换了，缓存里的旧 DEK 一条都不能留，否则重启前这几秒会用错钥匙
         cached = null
@@ -197,6 +209,17 @@ class DataKey(
             "本机存的密钥记录读不出来，不能覆盖它，暂时也存不了新密码。重启应用再试；如果一直这样，请用加密备份恢复。"
         private const val UNAVAILABLE_KEYSTORE =
             "本机的密钥系统不可用，没法接管这份备份。请重启设备后再试一次。"
+
+        /**
+         * 恢复后写回 `crypto_keys.crypto_version` 的值：源库是几就是几，**绝不顺手升到 2**。
+         * 单独拆出来是为了能在 JVM 单测里钉住（这个模块的单测不跑 SQLite）。
+         */
+        internal fun adoptedVersion(sourceVersion: Int): Int {
+            require(sourceVersion == VERSION_LEGACY || sourceVersion == VERSION_DEK) {
+                "源库版本号不认识：$sourceVersion"
+            }
+            return sourceVersion
+        }
 
         /**
          * 拿到 DEK 的唯一决策点，纯函数，单测专门钉住这几条：
