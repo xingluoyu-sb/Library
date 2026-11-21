@@ -16,6 +16,12 @@
 | **记录** | 随手记待办、当前状态、心情、一段文字、对未来的规划 |
 | **密码** | 存各平台的登录密码，同样便于查询 |
 
+## 界面
+
+| 资料库 | 记录 | 密码 | 设置 |
+|---|---|---|---|
+| <img src="docs/screenshots/library.jpg" width="200" /> | <img src="docs/screenshots/records.jpg" width="200" /> | <img src="docs/screenshots/passwords.jpg" width="200" /> | <img src="docs/screenshots/settings.jpg" width="200" /> |
+
 ## 功能
 
 **资料库**
