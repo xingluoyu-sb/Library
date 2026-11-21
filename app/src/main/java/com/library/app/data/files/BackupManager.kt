@@ -9,12 +9,15 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.provider.MediaStore
+import androidx.annotation.WorkerThread
 import com.library.app.data.crypto.BackupCodec
 import com.library.app.data.crypto.DataKey
 import com.library.app.data.db.AppDatabase
 import com.library.app.data.db.Schema
 import com.library.app.i18n.tr
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -64,6 +67,9 @@ class BackupManager(
         const val EXTENSION = "libbak"
         const val MIN_PASSPHRASE = 8
 
+        /** 覆盖原库之前留下的副本；恢复中途进程被杀，下次启动就靠它回退。 */
+        private const val ROLLBACK_NAME = "restore-rollback.db"
+
         /** 重启自己：先把新实例拉起来，再杀掉旧进程，避免同一进程里重开 DAO。 */
         fun restart(context: Context) {
             val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
@@ -76,6 +82,54 @@ class BackupManager(
                 600L,
             )
         }
+    }
+
+    private fun rollbackFile(): File = File(context.cacheDir, ROLLBACK_NAME)
+
+    private val _pendingRollback = MutableStateFlow(false)
+
+    /**
+     * 有「上次恢复没走完」的回退副本等着用户决定。
+     *
+     * 不能只靠 restoreFrom 里的局部变量：进程在
+     * `replaceDatabase()` 和 `adoptInto()` 之间被杀时，那段栈连同变量一起没了，
+     * 只剩磁盘上这份副本能说明发生过什么。
+     */
+    val pendingRollback: StateFlow<Boolean> = _pendingRollback
+
+    /**
+     * 启动时调用（AppDatabase 起来之后）。
+     *
+     * 判定条件就是「密钥拿不到 + 副本还在」：这时候库已经被换成新库，
+     * 里面包的还是上一台设备的 DEK，用户看到的是密码全打不开。
+     * 正常恢复成功时副本已删，恢复失败时原库已还原，两种情况都不会误报。
+     */
+    @WorkerThread
+    fun detectInterruptedRestore() {
+        val copy = rollbackFile()
+        if (!copy.exists() || copy.length() == 0L) {
+            _pendingRollback.value = false
+            return
+        }
+        val lost = runCatching { dataKey.key() }.exceptionOrNull() is DataKey.DekUnavailable
+        _pendingRollback.value = lost
+    }
+
+    /** 用户点了「退回」：用副本覆盖当前库，成功后清掉标记，由界面负责重启进程。 */
+    suspend fun rollbackToPendingCopy(): Restore = withContext(Dispatchers.IO) {
+        val copy = rollbackFile()
+        if (!copy.exists() || copy.length() == 0L) {
+            _pendingRollback.value = false
+            return@withContext Restore.Failed("上次的副本已经不在了，没法退回".tr())
+        }
+        runCatching { replaceDatabase(copy) }.fold(
+            onSuccess = {
+                copy.delete()
+                _pendingRollback.value = false
+                Restore.Ok
+            },
+            onFailure = { Restore.Failed("退回失败：${it.brief()}".tr()) },
+        )
     }
 
     /** 先看文件头，界面据此决定要不要问口令。 */
@@ -143,7 +197,7 @@ class BackupManager(
     suspend fun restoreFrom(uri: Uri, passphrase: String? = null): Restore = withContext(Dispatchers.IO) {
         val incoming = File(context.cacheDir, "backup-in.tmp")
         val decrypted = File(context.cacheDir, "backup-out.db")
-        val rollback = File(context.cacheDir, "restore-rollback.db")
+        val rollback = rollbackFile()
         // 回滚也失败时，这份副本就是原库唯一的拷贝，绝不能删
         var keepRollback = false
         try {
@@ -226,6 +280,7 @@ class BackupManager(
                 )
             }
 
+            _pendingRollback.value = false
             if (sourceVersion == DataKey.VERSION_LEGACY) {
                 return@withContext Restore.Partial(
                     "资料库恢复了，但里面的密码还是旧格式，需要重新迁移一次；" +

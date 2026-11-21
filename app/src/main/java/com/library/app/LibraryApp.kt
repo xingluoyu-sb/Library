@@ -16,6 +16,9 @@ class LibraryApp : Application() {
         com.library.app.i18n.Lang.init(this)
         // 回收站只在启动时清一次过期内容，不值得为它起常驻任务
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            // 上次恢复如果在「写完新库」和「写回 DEK」之间被杀，先把回退副本认下来，
+            // 让界面能问用户要不要退回；这一步要排在迁移之前
+            runCatching { container.backupManager.detectInterruptedRestore() }
             // 老版本的密码用的是 Keystore 密钥直接加密，换机解不开，
             // 这里统一改写成「数据密钥」加密；幂等，跑多少次都没关系
             runCatching { container.secretCrypto.migrateLegacyCiphertext() }

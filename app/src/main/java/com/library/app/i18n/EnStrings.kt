@@ -33,6 +33,14 @@ object EnStrings {
         "读不到这个文件" to "Couldn't read this file",
         "文件是空的" to "The file is empty",
         "这份备份需要口令" to "This backup needs a passphrase",
+        "上次恢复没有完成" to "The last restore didn't finish",
+        "新库已经写进去了，但密钥没接上，现在密码都打不开。可以退回恢复之前的资料库。" to
+            "The new database was written, but its key was never wired up, so no password opens right now. " +
+            "You can roll back to the library from before the restore.",
+        "退回" to "Roll back",
+        "正在退回…" to "Rolling back…",
+        "先不用" to "Not now",
+        "上次的副本已经不在了，没法退回" to "The copy from last time is gone, so there's nothing to roll back to",
         "备份文件不完整" to "The backup file is incomplete",
         "不像是资料库的备份" to "This doesn't look like a library backup",
         "口令不对，或者备份已经损坏" to "Wrong passphrase, or the backup is damaged",
@@ -411,6 +419,7 @@ object EnStrings {
         Regex("""^解不开这份备份：(.*)$""") to { m -> "Couldn't open this backup: ${m.groupValues[1]}" },
         Regex("""^写入临时文件失败：(.*)$""") to { m -> "Couldn't write the temporary file: ${m.groupValues[1]}" },
         Regex("""^写入失败：(.*)，请重启应用再试$""") to { m -> "Write failed: ${m.groupValues[1]}. Please restart the app and retry." },
+        Regex("""^退回失败：(.*)$""") to { m -> "Rollback failed: ${m.groupValues[1]}" },
         Regex("""^没能写入新库（(.*)），原来的资料库已经还原$""") to { m ->
             "Couldn't write the new database (${m.groupValues[1]}). The original library has been restored."
         },
