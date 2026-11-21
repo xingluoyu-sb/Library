@@ -177,6 +177,30 @@ class BackupCodecTest {
         dir.deleteRecursively()
     }
 
+    /** 头部里的轮数被改小（弱备份）或改大（骗我们空转）都不该开始派生口令。 */
+    @Test
+    fun outOfRangeIterationsIsRejected() {
+        for (bad in intArrayOf(999, 1_000_001)) {
+            val dir = tempDir()
+            val container = export(dir, fakeDatabase())
+            val bytes = container.readBytes()
+            bytes[6] = (bad ushr 24).toByte()
+            bytes[7] = (bad ushr 16).toByte()
+            bytes[8] = (bad ushr 8).toByte()
+            bytes[9] = bad.toByte()
+            container.writeBytes(bytes)
+            val out = File(dir, "restored.db")
+
+            try {
+                FileInputStream(container).use { BackupCodec.decodeTo(it, out, passphrase) }
+                fail("iter=$bad 的备份也被接受了")
+            } catch (e: BackupCodec.Damaged) {
+                assertFalse(out.exists())
+            }
+            dir.deleteRecursively()
+        }
+    }
+
     @Test
     fun iterationCountIsStoredInHeader() {
         val dir = tempDir()

@@ -5,8 +5,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.security.GeneralSecurityException
 import javax.crypto.AEADBadTagException
-import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
 import javax.crypto.CipherOutputStream
 import javax.crypto.spec.GCMParameterSpec
@@ -44,6 +44,13 @@ object BackupCodec {
     private const val TAG_BYTES = 16
 
     private const val BUFFER = 64 * 1024
+
+    /**
+     * 允许写在头部的 PBKDF2 轮数区间。
+     * 下限挡住「iter=1 的弱口令备份」，上限挡住伪造一个大数让我们空转。
+     */
+    private const val MIN_ITERATIONS = 10_000
+    private const val MAX_ITERATIONS = 1_000_000
 
     class WrongPassphrase : Exception("口令不对")
     class NotBackupFile : Exception("不是备份文件")
@@ -100,7 +107,7 @@ object BackupCodec {
         if (format != FORMAT_VERSION) throw Damaged()
 
         val iterations = bytesToInt(fixed, 6)
-        if (iterations !in 1..2_000_000) throw Damaged()
+        if (iterations !in MIN_ITERATIONS..MAX_ITERATIONS) throw Damaged()
         val salt = readFully(input, Kdf.SALT_SIZE)
         val iv = readFully(input, AesGcm.IV_SIZE)
         val key = Kdf.derive(passphrase, salt, iterations)
@@ -111,6 +118,7 @@ object BackupCodec {
         }
 
         var dek: ByteArray? = null
+        var completed = false
         try {
             FileOutputStream(outFile).use { target ->
                 val sink = PlainSink(target)
@@ -135,28 +143,25 @@ object BackupCodec {
                 dek = sink.dek
                 target.flush()
                 target.fd.sync()
+                completed = true
             }
         } catch (e: WrongPassphrase) {
-            outFile.delete()
             throw e
         } catch (e: Damaged) {
-            outFile.delete()
             throw e
         } catch (e: AEADBadTagException) {
-            outFile.delete()
-            throw WrongPassphrase()
-        } catch (e: BadPaddingException) {
-            // 部分实现把 tag 失败包成 BadPaddingException，不是 AEADBadTagException 子类
-            outFile.delete()
             throw WrongPassphrase()
         } catch (e: IOException) {
             // 读流被截断 / 写盘失败：文件本身不完整，不是口令问题
-            outFile.delete()
             throw Damaged()
-        } catch (e: Exception) {
-            // 流式 GCM 是在末尾才校验的，失败前可能已经写出半截明文，必须删掉再抛
-            outFile.delete()
+        } catch (e: GeneralSecurityException) {
+            // 只管密码学异常。部分实现把 tag 失败包成普通 BadPaddingException，
+            // 这里一并当「口令不对」；别的运行时异常没资格冒充解错口令，让它原样冒出去
             throw WrongPassphrase()
+        } finally {
+            // 流式 GCM 在末尾才校验，失败前可能已经写出半截明文。
+            // 用 finally 而不是每个 catch 里 delete：任何异常类型（包括没列出来的）都不许把明文留在盘上
+            if (!completed) outFile.delete()
         }
         return dek ?: throw Damaged()
     }

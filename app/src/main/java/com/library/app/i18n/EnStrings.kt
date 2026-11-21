@@ -57,6 +57,8 @@ object EnStrings {
         "这台设备上的数据密钥已经失效，之前加密的密码解不开了。请用之前导出的加密备份恢复（设置 → 数据与备份）。" to
             "The data key on this phone is gone, so saved passwords can no longer be decrypted. " +
             "Restore the encrypted backup you exported earlier (Settings → Data & backup).",
+        "数据库还没升级到支持加密的版本，先重启应用让它迁移一次。" to
+            "The database hasn't been upgraded to the encryption format yet. Restart the app so it can migrate.",
         "读不到数据密钥的记录，数据库可能损坏。重启应用再试；如果一直这样，请用加密备份恢复。" to
             "The key record can't be read; the database may be damaged. Restart the app and try again. " +
             "If it keeps happening, restore from an encrypted backup.",

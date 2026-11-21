@@ -2,6 +2,7 @@ package com.library.app.data.crypto
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import androidx.annotation.WorkerThread
 import com.library.app.data.db.AppDatabase
 import com.library.app.data.db.Schema
@@ -176,21 +177,34 @@ class DataKey(
             val dek = runCatching { box.decryptBytes(cursor.getString(0), AAD_DEK) }.getOrNull()
             if (dek == null) Stored.Unreadable else Stored.Found(dek)
         }
-    }.getOrDefault(Stored.Unreadable)
+    }.getOrElse { error ->
+        // 表都不在，说明库还没迁到 v8，这不是「密钥坏了」
+        if (error.isMissingTable()) throw DekUnavailable(UNAVAILABLE_NO_TABLE.tr())
+        Stored.Unreadable
+    }
 
     @WorkerThread
     private fun create(): ByteArray {
         val dek = AesGcm.randomBytes(DEK_SIZE)
         // 故意用 INSERT 而不是 INSERT OR REPLACE：真有一行就让它撞主键约束直接失败。
         // 「有行就绝不再写」不能靠调用方自觉，要让数据库来兜底
-        database.writableDatabase.execSQL(
-            "INSERT INTO ${Schema.TABLE_CRYPTO_KEYS} " +
-                "(id, wrapped_dek, crypto_version, created_at) VALUES (1, ?, ?, ?)",
-            arrayOf<Any>(box.encryptBytes(dek, AAD_DEK), VERSION_LEGACY, System.currentTimeMillis()),
-        )
+        try {
+            database.writableDatabase.execSQL(
+                "INSERT INTO ${Schema.TABLE_CRYPTO_KEYS} " +
+                    "(id, wrapped_dek, crypto_version, created_at) VALUES (1, ?, ?, ?)",
+                arrayOf<Any>(box.encryptBytes(dek, AAD_DEK), VERSION_LEGACY, System.currentTimeMillis()),
+            )
+        } catch (e: SQLiteException) {
+            // 表都没有就别报「加密失败」了，那是库没迁移，跟密钥无关
+            if (e.isMissingTable()) throw DekUnavailable(UNAVAILABLE_NO_TABLE.tr())
+            throw e
+        }
         cachedVersion = VERSION_LEGACY
         return dek
     }
+
+    private fun Throwable.isMissingTable(): Boolean =
+        this is SQLiteException && message?.contains("no such table", ignoreCase = true) == true
 
     companion object {
         const val DEK_SIZE = 32
@@ -207,6 +221,8 @@ class DataKey(
             "读不到数据密钥的记录，数据库可能损坏。重启应用再试；如果一直这样，请用加密备份恢复。"
         private const val UNAVAILABLE_STALE_ROW =
             "本机存的密钥记录读不出来，不能覆盖它，暂时也存不了新密码。重启应用再试；如果一直这样，请用加密备份恢复。"
+        private const val UNAVAILABLE_NO_TABLE =
+            "数据库还没升级到支持加密的版本，先重启应用让它迁移一次。"
         private const val UNAVAILABLE_KEYSTORE =
             "本机的密钥系统不可用，没法接管这份备份。请重启设备后再试一次。"
 
