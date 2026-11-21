@@ -53,7 +53,9 @@ import com.library.app.ui.LocalSecretCrypto
 import com.library.app.ui.LocalSecurityPrefs
 import com.library.app.ui.LocalSession
 import com.library.app.ui.screens.lock.findActivity
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.library.app.ui.components.AppIcons
 import com.library.app.ui.components.ConfirmDialog
 import com.library.app.ui.components.LibraryTopBar
@@ -88,7 +90,10 @@ fun EditorScreen(
     var groupMenuOpen by remember { mutableStateOf(false) }
 
     // 进入应用时已经验过身份，保存不再二次验证
-    val encrypt: suspend (String) -> SecretResult = { plain -> crypto.encryptNow(plain) }
+    // 加密前可能要先把旧格式密文迁完，会碰库，别放在主线程上
+    val encrypt: suspend (String) -> SecretResult = { plain ->
+        withContext(Dispatchers.IO) { crypto.encryptNow(plain) }
+    }
 
     LaunchedEffect(viewModel.message) {
         viewModel.message?.let {
@@ -330,7 +335,9 @@ private fun PasswordForm(
                                 val outcome = BiometricGate.authenticate(host, "查看密码".tr(), null)
                                 if (outcome is AuthOutcome.Success) {
                                     session.markPasswordVerified()
-                                    viewModel.revealSecret { ct -> crypto.decryptNow(ct) }
+                                    viewModel.revealSecret { ct ->
+                                        withContext(Dispatchers.IO) { crypto.decryptNow(ct) }
+                                    }
                                 } else {
                                     android.widget.Toast.makeText(
                                         context,
@@ -340,7 +347,9 @@ private fun PasswordForm(
                                 }
                             }
                         } else {
-                            viewModel.revealSecret { ct -> crypto.decryptNow(ct) }
+                            viewModel.revealSecret { ct ->
+                                withContext(Dispatchers.IO) { crypto.decryptNow(ct) }
+                            }
                         }
                     }) {
                         Icon(

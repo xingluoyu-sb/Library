@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.util.Base64
 import androidx.annotation.WorkerThread
 import com.library.app.data.db.AppDatabase
+import com.library.app.i18n.tr
 
 sealed interface SecretResult {
     data class Ok(val value: String) : SecretResult
@@ -39,22 +40,28 @@ class SecretCrypto(
         return keyguard.isDeviceSecure
     }
 
-    /** 不弹验证：保存时用。写哪种格式跟着当前 crypto_version 走，避免迁移窗口里写出混合版本。 */
+    /**
+     * 不弹验证：保存时用。
+     *
+     * 写入口只允许一种格式：`v2:`（DEK）。库里可能还有没迁完的 `v1:` 密文，
+     * 那就先把迁移做完再写；迁移做不成就直接失败，**绝不退回去写 Keystore 直加的旧格式**。
+     * 旧格式换台手机就永远打不开，继续写等于源源不断地制造新的坏数据。
+     */
     fun encryptNow(plain: String): SecretResult {
         if (plain.isEmpty()) return SecretResult.Ok("")
-        return runCatching {
-            if (dataKey.version() == DataKey.VERSION_DEK) {
-                encryptWithDek(plain)
+        return try {
+            if (dataKey.version() != DataKey.VERSION_DEK) migrateLegacyCiphertext()
+            if (dataKey.version() != DataKey.VERSION_DEK) {
+                SecretResult.Failed("密码存储还没完成迁移，这次没有保存".tr())
             } else {
-                // 迁移还没完成，继续用老格式写，等迁移时一起转
-                box.encrypt(plain)
+                SecretResult.Ok(encryptWithDek(plain))
             }
-        }.fold(
-            onSuccess = { SecretResult.Ok(it) },
-            onFailure = {
-                SecretResult.Failed("加密失败：${it.javaClass.simpleName} ${it.message.orEmpty()}".trim())
-            },
-        )
+        } catch (e: DataKey.DekUnavailable) {
+            // 密钥失效能救的只有备份，别把它埋在一串类名里
+            SecretResult.Failed(e.message.orEmpty())
+        } catch (e: Exception) {
+            SecretResult.Failed("加密失败：${e.javaClass.simpleName} ${e.message.orEmpty()}".trim())
+        }
     }
 
     /** 不弹验证：查看时用。 */
@@ -74,8 +81,14 @@ class SecretCrypto(
             }
         }.fold(
             onSuccess = { SecretResult.Ok(it) },
-            onFailure = {
-                SecretResult.Failed("解密失败：${it.javaClass.simpleName} ${it.message.orEmpty()}".trim())
+            onFailure = { error ->
+                if (error is DataKey.DekUnavailable) {
+                    SecretResult.Failed(error.message.orEmpty())
+                } else {
+                    SecretResult.Failed(
+                        "解密失败：${error.javaClass.simpleName} ${error.message.orEmpty()}".trim(),
+                    )
+                }
             },
         )
     }

@@ -20,8 +20,8 @@ android {
         applicationId = "com.library.app"
         minSdk = 30
         targetSdk = 37
-        versionCode = 17
-        versionName = "1.0.2"
+        versionCode = 18
+        versionName = "1.0.3"
     }
 
     signingConfigs {

@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.annotation.WorkerThread
 import com.library.app.data.db.AppDatabase
 import com.library.app.data.db.Schema
+import com.library.app.i18n.tr
 
 /**
  * 数据密钥（DEK）的管家。
@@ -22,11 +23,30 @@ import com.library.app.data.db.Schema
  *
  * `crypto_version` 是唯一的版本真相：1 = 密文还是 Keystore 直加的旧格式，
  * 2 = 已经全量换成 DEK。读取路径只看它，不做「解不开就换一种」的试探。
+ *
+ * **绝不在 version = 2 时新建密钥。** 那意味着库里的 `v2:` 密文全都指向一个已经
+ * 拿不到的 DEK，此时唯一正确的动作是报 [DekUnavailable] 让用户去恢复备份；
+ * 覆盖掉旧的包裹记录只会把「还能救」变成「永远救不回」。
  */
 class DataKey(
     private val context: Context,
     private val database: AppDatabase,
 ) {
+
+    /** 恢复备份时用的「已经包好的 DEK」，必须在覆盖原库之前拿到。 */
+    class Adoption internal constructor(internal val wrapped: String)
+
+    /** 本机拿不到数据密钥，且库已经迁移到 DEK 版本：只能靠备份恢复。 */
+    class DekUnavailable(message: String) : Exception(message)
+
+    /** 库里那条包裹记录的实际状态。**只有「根本没有这一行」才允许新建**。 */
+    internal sealed interface Stored {
+        data class Found(val dek: ByteArray) : Stored
+        /** 表是空的，从来没有生成过 DEK。 */
+        data object Absent : Stored
+        /** 有这一行，但本机 Keystore 解不开（换机 / 密钥被作废 / 记录被改坏）。 */
+        data object Unreadable : Stored
+    }
 
     private val box = CryptoBox(context)
 
@@ -38,41 +58,63 @@ class DataKey(
 
     /** 1 = 旧 Keystore 密文；2 = DEK 密文。没有记录也算 1（老库刚升级上来的状态）。 */
     @WorkerThread
-    fun version(): Int {
+    fun version(): Int = versionOrNull() ?: VERSION_LEGACY
+
+    @WorkerThread
+    private fun versionOrNull(): Int? {
         cachedVersion?.let { return it }
-        val value = runCatching {
+        return runCatching {
             database.readableDatabase.rawQuery(
                 "SELECT crypto_version FROM ${Schema.TABLE_CRYPTO_KEYS} WHERE id = 1",
                 null,
             ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else VERSION_LEGACY }
-        }.getOrDefault(VERSION_LEGACY)
-        cachedVersion = value
-        return value
+        }.getOrNull()?.also { cachedVersion = it }
     }
 
-    /** 没有就建一个（版本仍是 1，等迁移完成后才变 2）。 */
+    /**
+     * 拿到这次要用的 DEK。
+     *
+     * 只有「`crypto_keys` 里根本没有这一行」才会新建。**有行就绝不再写**：
+     * 那一行可能是换机后解不开的旧包裹，覆盖它就是把它彻底毁掉。
+     * 版本 2 又没有可用密钥时抛 [DekUnavailable]，把用户引到备份恢复上。
+     */
     @WorkerThread
     fun key(): ByteArray {
         cached?.let { return it }
         synchronized(this) {
             cached?.let { return it }
-            val dek = load() ?: create()
+            val version = versionOrNull() ?: throw DekUnavailable(UNAVAILABLE_UNREADABLE.tr())
+            val dek = resolve(version, readStored()) { create() }
             cached = dek
             return dek
         }
     }
 
     @WorkerThread
-    fun loadOrNull(): ByteArray? = cached ?: load()
+    fun loadOrNull(): ByteArray? = cached ?: (readStored() as? Stored.Found)?.dek
 
     /**
-     * 恢复备份后调用：把容器里带出来的 DEK 用本机 Keystore 重新包一遍写进新库。
-     * 这里直接对刚落盘的库文件动手，不能用 [database]（它已经被 close 了）。
+     * 恢复备份用，**必须在覆盖原库之前调用**：先把容器里的 DEK 用本机 Keystore 包好，
+     * 失败就在这里返回，原库一个字节都没动。包好之后落库只剩一条 INSERT，失败面小得多。
      */
     @WorkerThread
-    fun adoptInto(db: SQLiteDatabase, dek: ByteArray) {
+    fun prepareAdoption(dek: ByteArray): Adoption {
         require(dek.size == DEK_SIZE) { "数据密钥长度不对" }
-        box.ensureKey()
+        if (box.ensureKey() == CryptoBox.KeyState.FAILED) {
+            throw DekUnavailable(UNAVAILABLE_KEYSTORE.tr())
+        }
+        val wrapped = runCatching { box.encryptBytes(dek, AAD_DEK) }.getOrElse {
+            throw DekUnavailable(UNAVAILABLE_KEYSTORE.tr())
+        }
+        return Adoption(wrapped)
+    }
+
+    /**
+     * 把 [prepareAdoption] 包好的 DEK 写进刚落盘的新库。
+     * 这里直接对库文件动手，不能用 [database]（它已经被 close 了）。
+     */
+    @WorkerThread
+    fun adoptInto(db: SQLiteDatabase, adoption: Adoption) {
         // 恢复来的可能是 v7 及更早的库，先把表补出来
         db.execSQL(
             """
@@ -84,11 +126,15 @@ class DataKey(
             )
             """.trimIndent(),
         )
+        // 全项目唯一允许覆盖包裹记录的地方：新库是从别的设备带过来的，
+        // 那行里包的是上一台机器的 DEK，本机永远解不开，接管它就是这里的目的
         db.execSQL(
             "INSERT OR REPLACE INTO ${Schema.TABLE_CRYPTO_KEYS} " +
                 "(id, wrapped_dek, crypto_version, created_at) VALUES (1, ?, ?, ?)",
-            arrayOf<Any>(box.encryptBytes(dek, AAD_DEK), VERSION_DEK, System.currentTimeMillis()),
+            arrayOf<Any>(adoption.wrapped, VERSION_DEK, System.currentTimeMillis()),
         )
+        // 密钥换了，缓存里的旧 DEK 一条都不能留，否则重启前这几秒会用错钥匙
+        cached = null
         invalidate()
     }
 
@@ -107,24 +153,26 @@ class DataKey(
         cachedVersion = null
     }
 
+    /** 读库里包着的 DEK，并区分「没有这行」和「有行但解不开」。 */
     @WorkerThread
-    private fun load(): ByteArray? = runCatching {
+    private fun readStored(): Stored = runCatching {
         database.readableDatabase.rawQuery(
             "SELECT wrapped_dek FROM ${Schema.TABLE_CRYPTO_KEYS} WHERE id = 1",
             null,
         ).use { cursor ->
-            if (!cursor.moveToFirst()) return@use null
-            // 换了设备或 Keystore 密钥被系统作废时解不开，当作「没有」重新生成；
-            // 此时旧密文确实读不出来了，只能靠带口令的备份恢复
-            runCatching { box.decryptBytes(cursor.getString(0), AAD_DEK) }.getOrNull()
+            if (!cursor.moveToFirst()) return@use Stored.Absent
+            val dek = runCatching { box.decryptBytes(cursor.getString(0), AAD_DEK) }.getOrNull()
+            if (dek == null) Stored.Unreadable else Stored.Found(dek)
         }
-    }.getOrNull()
+    }.getOrDefault(Stored.Unreadable)
 
     @WorkerThread
     private fun create(): ByteArray {
         val dek = AesGcm.randomBytes(DEK_SIZE)
+        // 故意用 INSERT 而不是 INSERT OR REPLACE：真有一行就让它撞主键约束直接失败。
+        // 「有行就绝不再写」不能靠调用方自觉，要让数据库来兜底
         database.writableDatabase.execSQL(
-            "INSERT OR REPLACE INTO ${Schema.TABLE_CRYPTO_KEYS} " +
+            "INSERT INTO ${Schema.TABLE_CRYPTO_KEYS} " +
                 "(id, wrapped_dek, crypto_version, created_at) VALUES (1, ?, ?, ?)",
             arrayOf<Any>(box.encryptBytes(dek, AAD_DEK), VERSION_LEGACY, System.currentTimeMillis()),
         )
@@ -140,5 +188,33 @@ class DataKey(
 
         /** 包 DEK 用的 AAD，和加密密码字段用的不是同一个值。 */
         val AAD_DEK = "dek-v1".toByteArray(Charsets.UTF_8)
+
+        private const val UNAVAILABLE_LOST =
+            "这台设备上的数据密钥已经失效，之前加密的密码解不开了。请用之前导出的加密备份恢复（设置 → 数据与备份）。"
+        private const val UNAVAILABLE_UNREADABLE =
+            "读不到数据密钥的记录，数据库可能损坏。重启应用再试；如果一直这样，请用加密备份恢复。"
+        private const val UNAVAILABLE_STALE_ROW =
+            "本机存的密钥记录读不出来，不能覆盖它，暂时也存不了新密码。重启应用再试；如果一直这样，请用加密备份恢复。"
+        private const val UNAVAILABLE_KEYSTORE =
+            "本机的密钥系统不可用，没法接管这份备份。请重启设备后再试一次。"
+
+        /**
+         * 拿到 DEK 的唯一决策点，纯函数，单测专门钉住这几条：
+         *
+         * - 读到了就用；
+         * - **有行但解不开 → 一律报错**，不管版本号是几（版本 1 时那行也没用了，
+         *   但删了换新的同样属于「写」，宁可让用户看见）；
+         * - 只有完全没有这一行、并且版本还不是 2，才允许新建。
+         */
+        internal fun resolve(version: Int, stored: Stored, create: () -> ByteArray): ByteArray =
+            when (stored) {
+                is Stored.Found -> stored.dek
+                Stored.Absent ->
+                    if (version == VERSION_DEK) throw DekUnavailable(UNAVAILABLE_LOST.tr()) else create()
+                Stored.Unreadable ->
+                    throw DekUnavailable(
+                        (if (version == VERSION_DEK) UNAVAILABLE_LOST else UNAVAILABLE_STALE_ROW).tr(),
+                    )
+            }
     }
 }

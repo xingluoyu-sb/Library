@@ -9,6 +9,7 @@ import org.junit.Test
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.FilterInputStream
 
 class BackupCodecTest {
 
@@ -98,13 +99,81 @@ class BackupCodecTest {
         val container = export(dir, fakeDatabase())
         val bytes = container.readBytes()
         container.writeBytes(bytes.copyOfRange(0, bytes.size - 1024))
+        val out = File(dir, "restored.db")
 
         try {
-            FileInputStream(container).use { BackupCodec.decodeTo(it, File(dir, "x.db"), passphrase) }
+            FileInputStream(container).use { BackupCodec.decodeTo(it, out, passphrase) }
             fail("被截断的备份居然解开了")
         } catch (e: Exception) {
             assertTrue(e is BackupCodec.WrongPassphrase || e is BackupCodec.Damaged)
+            // 静默吞掉 tag 失败的老实现会在这里留下一个截断的「明文库」
+            assertFalse("失败后不能留下明文库", out.exists())
         }
+        dir.deleteRecursively()
+    }
+
+    /**
+     * 只用 tag 校验还不够：JDK 的 CipherInputStream 会把 AEADBadTagException 吞成 -1。
+     * 这里改掉密文中间的一个字节，要求必须失败、且一个字节的明文都不能留在盘上。
+     */
+    @Test
+    fun tamperedCiphertextFailsAndLeavesNoPlaintext() {
+        val dir = tempDir()
+        val container = export(dir, fakeDatabase())
+        val bytes = container.readBytes()
+        val middle = bytes.size / 2
+        bytes[middle] = (bytes[middle].toInt() xor 0x01).toByte()
+        container.writeBytes(bytes)
+        val out = File(dir, "restored.db")
+
+        try {
+            FileInputStream(container).use { BackupCodec.decodeTo(it, out, passphrase) }
+            fail("密文被改过却解开了")
+        } catch (e: Exception) {
+            assertTrue(e is BackupCodec.WrongPassphrase || e is BackupCodec.Damaged)
+            assertFalse("失败后不能留下明文库", out.exists())
+        }
+        dir.deleteRecursively()
+    }
+
+    /** 头部之后立刻截断：连 DEK 都读不全，必须失败。 */
+    @Test
+    fun cutoffRightAfterHeaderIsRejected() {
+        val dir = tempDir()
+        val container = export(dir, fakeDatabase())
+        val bytes = container.readBytes()
+        // 5 + 1 + 4 + 16 + 12 = 38 字节头部，再加一点点密文
+        container.writeBytes(bytes.copyOfRange(0, 38 + 8))
+        val out = File(dir, "restored.db")
+
+        try {
+            FileInputStream(container).use { BackupCodec.decodeTo(it, out, passphrase) }
+            fail("只剩头部的备份居然解开了")
+        } catch (e: Exception) {
+            assertFalse(out.exists())
+        }
+        dir.deleteRecursively()
+    }
+
+    /**
+     * 自己驱动 update/doFinal 之后，明文头可能被切在任意一次 read 里。
+     * 让输入流每次只吐 1 个字节，专门踩这个边界。
+     */
+    @Test
+    fun decodesWhenStreamDeliversOneByteAtATime() {
+        val dir = tempDir()
+        val db = fakeDatabase(bytes = 3000)
+        val container = export(dir, db)
+        val out = File(dir, "restored.db")
+
+        val trickle = object : FilterInputStream(FileInputStream(container)) {
+            override fun read(b: ByteArray, off: Int, len: Int): Int =
+                super.read(b, off, minOf(1, len))
+        }
+        val recovered = trickle.use { BackupCodec.decodeTo(it, out, passphrase) }
+
+        assertArrayEquals(db, out.readBytes())
+        assertArrayEquals(dek, recovered)
         dir.deleteRecursively()
     }
 

@@ -59,6 +59,14 @@
   读取路径只看这个值，密文前缀对不上就报错，不做「解不开换一种试试」
 - **迁移是一次性的整表操作**：读旧行、改写、提交版本号在同一个 SQLite 事务里，任何一行失败整表回滚；
   Keystore 里的旧密钥一直保留，不删
+- **DEK 丢了绝不重建**：换机、恢复出厂、密钥被系统作废时，`crypto_keys` 里那一行会解不开。
+  这时只有「表里根本没有这一行」才允许生成新 DEK，有行一律报错并把用户引到备份恢复
+  （写入口也只用 `INSERT`，不用 `INSERT OR REPLACE`，让主键约束兜底）；
+  保存密码同样不再退回旧的 Keystore 直加密格式，只写 `v2:`
+- **恢复顺序**：先用本机 Keystore 把备份里的 DEK 包好，成功后才动原库；覆盖前把原库整份留在 cacheDir，
+  写新库或接管 DEK 失败就原地还原
+- **容器解密**：不用 `CipherInputStream`（JDK 上它可能把 tag 校验失败吞成 -1），
+  自己驱动 `update`/`doFinal`，再拿明文长度和密文长度对一次账
 - **备份容器**：`LIBK1 | 版本 | PBKDF2 轮数 | salt(16) | iv(12) | AES-GCM 密文 + tag`，
   明文内容 = DEK + 数据库字节。口令不写进文件，也不等于锁屏口令
 
@@ -81,7 +89,7 @@ cp keystore.properties.example keystore.properties   # 然后填上自己的 key
 ./gradlew :app:testDebugUnitTest
 ```
 
-覆盖加解密往返、IV 不重复、AAD 不匹配即失败、容器错口令/篡改/截断、迁移整批全成或全不改写等 21 个用例。
+覆盖加解密往返、IV 不重复、AAD 不匹配即失败、容器错口令/篡改/截断、迁移整批全成或全不改写、密钥丢失时不重建也不覆盖旧记录等 29 个用例。
 
 Windows 下也可以直接双击 `build.bat`（用的是系统里的 `JAVA_HOME` / `ANDROID_HOME`）。
 
@@ -92,7 +100,7 @@ Windows 下也可以直接双击 `build.bat`（用的是系统里的 `JAVA_HOME`
 ```
 app/src/main/java/com/library/app/
 ├── data/
-│   ├── db/          Schema + SQLiteOpenHelper 手写迁移（当前 version 7）
+│   ├── db/          Schema + SQLiteOpenHelper 手写迁移（当前 version 8）
 │   ├── dao/         Entry / Folder / Module 的 SQL
 │   ├── files/       FileStore、FolderImporter、TrashStore、BackupManager
 │   ├── crypto/      CryptoBox（Keystore）、DataKey（数据密钥）、BackupCodec（加密备份容器）

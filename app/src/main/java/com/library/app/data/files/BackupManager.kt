@@ -135,9 +135,13 @@ class BackupManager(
     suspend fun restoreFrom(uri: Uri, passphrase: String? = null): Restore = withContext(Dispatchers.IO) {
         val incoming = File(context.cacheDir, "backup-in.tmp")
         val decrypted = File(context.cacheDir, "backup-out.db")
+        val rollback = File(context.cacheDir, "restore-rollback.db")
+        // 回滚也失败时，这份副本就是原库唯一的拷贝，绝不能删
+        var keepRollback = false
         try {
             incoming.delete()
             decrypted.delete()
+            rollback.delete()
 
             runCatching {
                 context.contentResolver.openInputStream(uri)?.use { input ->
@@ -178,23 +182,71 @@ class BackupManager(
 
             validate(source)?.let { return@withContext Restore.Failed(it) }
 
-            return@withContext runCatching {
+            // ① 先把「新库里的 DEK 能不能被本机接管」验掉。
+            //    这一步失败时原库一个字节都没动，用户还能照常用旧数据
+            val adoption = dek?.let { raw ->
+                runCatching { dataKey.prepareAdoption(raw) }.getOrElse { error ->
+                    return@withContext Restore.Failed(error.restoreReason())
+                }
+            }
+
+            // ② 覆盖前把原库整份拷到 cacheDir，后面任何一步失败都能退回去
+            val haveRollback = copyDatabaseTo(rollback)
+
+            runCatching {
                 replaceDatabase(source)
-                if (dek != null) {
+                if (adoption != null) {
                     SQLiteDatabase.openDatabase(
                         context.getDatabasePath(AppDatabase.NAME).path,
                         null,
                         SQLiteDatabase.OPEN_READWRITE,
-                    ).use { dataKey.adoptInto(it, dek) }
+                    ).use { dataKey.adoptInto(it, adoption) }
                 }
-                Restore.Ok
-            }.getOrElse { Restore.Failed("写入失败：${it.brief()}，请重启应用再试".tr()) }
+            }.onFailure { error ->
+                val restored = haveRollback && runCatching { replaceDatabase(rollback) }.isSuccess
+                keepRollback = !restored
+                return@withContext Restore.Failed(
+                    if (restored) {
+                        "没能写入新库（${error.brief()}），原来的资料库已经还原".tr()
+                    } else {
+                        "没能写入新库（${error.brief()}），原库也没能还原；请重启应用后再恢复一次".tr()
+                    },
+                )
+            }
+            Restore.Ok
         } finally {
             // 明文数据库的临时副本必须在这里清掉，失败路径也不能留
             incoming.delete()
             decrypted.delete()
+            if (!keepRollback) rollback.delete()
         }
     }
+
+    /**
+     * 覆盖前留一份原库。先把 WAL 并进主文件，否则拷出来的副本会缺最近写入的内容。
+     * 返回 false 表示没留成（比如本来就没有库），调用方据此决定失败时怎么说。
+     */
+    private fun copyDatabaseTo(target: File): Boolean = runCatching {
+        runCatching {
+            database.writableDatabase.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null)
+                .use { it.moveToFirst() }
+        }
+        val original = context.getDatabasePath(AppDatabase.NAME)
+        if (!original.exists()) return@runCatching false
+        target.delete()
+        original.inputStream().use { input ->
+            FileOutputStream(target).use { output ->
+                input.copyTo(output, 64 * 1024)
+                output.flush()
+                output.fd.sync()
+            }
+        }
+        true
+    }.getOrDefault(false)
+
+    private fun Throwable.restoreReason(): String =
+        (this as? DataKey.DekUnavailable)?.message?.takeIf { it.isNotBlank() }
+            ?: "本机的密钥系统不可用，没法接管这份备份".tr()
 
     private fun replaceDatabase(source: File) {
         // 先放掉连接，否则旧句柄还会继续写老文件

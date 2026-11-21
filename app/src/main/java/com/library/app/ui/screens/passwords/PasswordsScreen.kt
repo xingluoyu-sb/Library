@@ -47,7 +47,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.library.app.data.crypto.AuthOutcome
 import com.library.app.data.crypto.BiometricGate
-import com.library.app.data.crypto.SecretResult
 import com.library.app.data.model.Entry
 import com.library.app.ui.LocalSecretCrypto
 import com.library.app.ui.LocalSecurityPrefs
@@ -89,7 +88,8 @@ fun PasswordsScreen(
         if (gated) {
             viewModel.clearPlaintext()
         } else {
-            viewModel.loadPlaintext { ct -> (crypto.decryptNow(ct) as? SecretResult.Ok)?.value }
+            viewModel.loadPlaintext { ct -> crypto.decryptNow(ct) }
+                ?.let { snackbar.showSnackbar(it) }
         }
     }
 

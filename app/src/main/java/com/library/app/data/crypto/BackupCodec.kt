@@ -2,11 +2,12 @@ package com.library.app.data.crypto
 
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import javax.crypto.AEADBadTagException
+import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
-import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -36,6 +37,14 @@ object BackupCodec {
     private const val HEADER_FIXED = 5 + 1 + 4
     private val AAD = "backup-v1".toByteArray(Charsets.UTF_8)
 
+    private const val MIN_DEK_SIZE = 16
+    private const val MAX_DEK_SIZE = 64
+
+    /** GCM 的 tag 长度，密文总是比明文多这么多。 */
+    private const val TAG_BYTES = 16
+
+    private const val BUFFER = 64 * 1024
+
     class WrongPassphrase : Exception("口令不对")
     class NotBackupFile : Exception("不是备份文件")
     class Damaged : Exception("备份文件损坏")
@@ -64,10 +73,11 @@ object BackupCodec {
             init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
             updateAAD(AAD)
         }
+        // 加密方向的 CipherOutputStream 没有「吞掉 tag」的问题：doFinal 在 close 里抛得出来
         CipherOutputStream(out, cipher).use { encrypted ->
             encrypted.write(intToBytes(dek.size))
             encrypted.write(dek)
-            dbFile.inputStream().use { it.copyTo(encrypted, 64 * 1024) }
+            dbFile.inputStream().use { it.copyTo(encrypted, BUFFER) }
             encrypted.flush()
         }
         out.flush()
@@ -75,7 +85,13 @@ object BackupCodec {
 
     /**
      * 解密到 [outFile]，返回容器里带出来的 DEK。
-     * 口令错、文件被改、被截断，一律抛 [WrongPassphrase]（区分不出是哪种，也不该区分）。
+     * 口令错、文件被改、被截断，一律抛 [WrongPassphrase] 或 [Damaged]（区分不出是哪种，也不该区分）。
+     *
+     * 刻意**不用** `CipherInputStream`：JDK 里它在 doFinal 抛 `AEADBadTagException` 时
+     * 有的版本会静默返回 -1 而不是把异常抛出来，于是错误口令被当成「解完了」，
+     * 落盘一个截断的明文库，`catch` 也救不到（根本没有异常）。Conscrypt 在真机上会抛，
+     * 所以这是个「测试机通过、真机不安全」的坑。
+     * 这里自己驱动 `update` / `doFinal`，并核对明文长度与密文长度，两条腿一起站。
      */
     fun decodeTo(input: InputStream, outFile: File, passphrase: String): ByteArray {
         val fixed = readFully(input, HEADER_FIXED)
@@ -94,17 +110,31 @@ object BackupCodec {
             updateAAD(AAD)
         }
 
-        var dek: ByteArray
+        var dek: ByteArray? = null
         try {
-            CipherInputStream(input, cipher).use { decrypted ->
-                val length = bytesToInt(readFully(decrypted, 4), 0)
-                if (length !in 16..64) throw Damaged()
-                dek = readFully(decrypted, length)
-                FileOutputStream(outFile).use { target ->
-                    decrypted.copyTo(target, 64 * 1024)
-                    target.flush()
-                    target.fd.sync()
+            FileOutputStream(outFile).use { target ->
+                val sink = PlainSink(target)
+                val buffer = ByteArray(BUFFER)
+                var cipherBytes = 0L
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    if (n == 0) continue
+                    cipherBytes += n
+                    val chunk = cipher.update(buffer, 0, n)
+                    if (chunk != null && chunk.isNotEmpty()) sink.write(chunk, 0, chunk.size)
                 }
+                // tag 在这里校验，抛 AEADBadTagException；抛不出来就说明实现有问题，
+                // 所以下面还要再用长度对一次账
+                val tail = cipher.doFinal()
+                if (tail != null && tail.isNotEmpty()) sink.write(tail, 0, tail.size)
+
+                val plain = sink.finish()
+                // 明文长度必须正好是「密文 - tag」；对不上就是流被截断或中间丢过数据
+                if (plain.size != cipherBytes - TAG_BYTES) throw Damaged()
+                dek = sink.dek
+                target.flush()
+                target.fd.sync()
             }
         } catch (e: WrongPassphrase) {
             outFile.delete()
@@ -115,36 +145,96 @@ object BackupCodec {
         } catch (e: AEADBadTagException) {
             outFile.delete()
             throw WrongPassphrase()
+        } catch (e: BadPaddingException) {
+            // 部分实现把 tag 失败包成 BadPaddingException，不是 AEADBadTagException 子类
+            outFile.delete()
+            throw WrongPassphrase()
+        } catch (e: IOException) {
+            // 读流被截断 / 写盘失败：文件本身不完整，不是口令问题
+            outFile.delete()
+            throw Damaged()
         } catch (e: Exception) {
-            // 流式 GCM 是在流末尾才校验 tag 的，口令错时可能已经写出半截乱码，
-            // 这里必须把落盘的明文删掉再抛
+            // 流式 GCM 是在末尾才校验的，失败前可能已经写出半截明文，必须删掉再抛
             outFile.delete()
             throw WrongPassphrase()
         }
-        return dek
+        return dek ?: throw Damaged()
     }
 
-    private fun intToBytes(value: Int) = byteArrayOf(
-        (value ushr 24).toByte(),
-        (value ushr 16).toByte(),
-        (value ushr 8).toByte(),
-        value.toByte(),
-    )
+    /**
+     * 把解密出来的明文按「4 字节 DEK 长度 | DEK | 库字节」拆开：
+     * 头部攒在内存里，其余全部直接落盘。
+     *
+     * 返回的 [dek] 只有走完 [finish] 才非空；[finish] 顺便确认头部是完整的。
+     */
+    private class PlainSink(private val target: OutputStream) {
 
-    private fun bytesToInt(bytes: ByteArray, offset: Int): Int =
-        ((bytes[offset].toInt() and 0xFF) shl 24) or
-            ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
-            ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
-            (bytes[offset + 3].toInt() and 0xFF)
+        private val head = ByteArray(4 + MAX_DEK_SIZE)
+        private var headLen = 0
+        private var need = -1
+        private var total = 0L
 
-    private fun readFully(input: InputStream, size: Int): ByteArray {
-        val buffer = ByteArray(size)
-        var read = 0
-        while (read < size) {
-            val n = input.read(buffer, read, size - read)
-            if (n <= 0) throw Damaged()
-            read += n
+        var dek: ByteArray? = null
+            private set
+
+        fun write(buf: ByteArray, off: Int, len: Int) {
+            total += len
+            var o = off
+            var n = len
+            while (dek == null && n > 0) {
+                if (need < 0) {
+                    // 还不知道 DEK 多长，只先凑够 4 字节长度
+                    val take = minOf(4 - headLen, n)
+                    System.arraycopy(buf, o, head, headLen, take)
+                    headLen += take
+                    o += take
+                    n -= take
+                    if (headLen == 4) {
+                        val size = bytesToInt(head, 0)
+                        if (size !in MIN_DEK_SIZE..MAX_DEK_SIZE) throw Damaged()
+                        need = 4 + size
+                    }
+                } else {
+                    val take = minOf(need - headLen, n)
+                    System.arraycopy(buf, o, head, headLen, take)
+                    headLen += take
+                    o += take
+                    n -= take
+                    if (headLen == need) dek = head.copyOfRange(4, need)
+                }
+            }
+            if (n > 0) target.write(buf, o, n)
         }
-        return buffer
+
+        fun finish(): PlainSink {
+            if (dek == null) throw Damaged()
+            return this
+        }
+
+        val size: Long get() = total
     }
+}
+
+private fun intToBytes(value: Int) = byteArrayOf(
+    (value ushr 24).toByte(),
+    (value ushr 16).toByte(),
+    (value ushr 8).toByte(),
+    value.toByte(),
+)
+
+private fun bytesToInt(bytes: ByteArray, offset: Int): Int =
+    ((bytes[offset].toInt() and 0xFF) shl 24) or
+        ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
+        ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
+        (bytes[offset + 3].toInt() and 0xFF)
+
+private fun readFully(input: InputStream, size: Int): ByteArray {
+    val buffer = ByteArray(size)
+    var read = 0
+    while (read < size) {
+        val n = input.read(buffer, read, size - read)
+        if (n <= 0) throw BackupCodec.Damaged()
+        read += n
+    }
+    return buffer
 }

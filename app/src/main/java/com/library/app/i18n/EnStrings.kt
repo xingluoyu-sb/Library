@@ -36,6 +36,19 @@ object EnStrings {
         "备份文件不完整" to "The backup file is incomplete",
         "不像是资料库的备份" to "This doesn't look like a library backup",
         "口令不对，或者备份已经损坏" to "Wrong passphrase, or the backup is damaged",
+        "密码存储还没完成迁移，这次没有保存" to "Password storage hasn't finished migrating, so nothing was saved",
+        // 数据密钥
+        "这台设备上的数据密钥已经失效，之前加密的密码解不开了。请用之前导出的加密备份恢复（设置 → 数据与备份）。" to
+            "The data key on this phone is gone, so saved passwords can no longer be decrypted. " +
+            "Restore the encrypted backup you exported earlier (Settings → Data & backup).",
+        "读不到数据密钥的记录，数据库可能损坏。重启应用再试；如果一直这样，请用加密备份恢复。" to
+            "The key record can't be read; the database may be damaged. Restart the app and try again. " +
+            "If it keeps happening, restore from an encrypted backup.",
+        "本机存的密钥记录读不出来，不能覆盖它，暂时也存不了新密码。重启应用再试；如果一直这样，请用加密备份恢复。" to
+            "The key record on this phone can't be read. It won't be overwritten, so new passwords can't be " +
+            "saved for now. Restart the app; if it persists, restore from an encrypted backup.",
+        "本机的密钥系统不可用，没法接管这份备份。请重启设备后再试一次。" to
+            "This phone's keystore is unavailable, so the backup can't be adopted. Restart the device and try again.",
         // 通用
         "确定" to "OK",
         "取消" to "Cancel",
@@ -395,6 +408,15 @@ object EnStrings {
         Regex("""^解不开这份备份：(.*)$""") to { m -> "Couldn't open this backup: ${m.groupValues[1]}" },
         Regex("""^写入临时文件失败：(.*)$""") to { m -> "Couldn't write the temporary file: ${m.groupValues[1]}" },
         Regex("""^写入失败：(.*)，请重启应用再试$""") to { m -> "Write failed: ${m.groupValues[1]}. Please restart the app and retry." },
+        Regex("""^没能写入新库（(.*)），原来的资料库已经还原$""") to { m ->
+            "Couldn't write the new database (${m.groupValues[1]}). The original library has been restored."
+        },
+        Regex("""^没能写入新库（(.*)），原库也没能还原，请重启应用后再恢复一次$""") to { m ->
+            "Couldn't write the new database (${m.groupValues[1]}), and the original wasn't restored either. " +
+                "Restart the app and restore again."
+        },
+        Regex("""^加密失败：(.*)$""") to { m -> "Encryption failed: ${m.groupValues[1]}" },
+        Regex("""^解密失败：(.*)$""") to { m -> "Decryption failed: ${m.groupValues[1]}" },
         Regex("""^这个备份是 v(\d+)，当前只认 v1–v(\d+)$""") to { m -> "This backup is v${m.groupValues[1]}; only v1–v${m.groupValues[2]} is supported" },
         Regex("""^不像是资料库的备份（缺 (.*)）$""") to { m -> "Doesn't look like a library backup (missing ${m.groupValues[1]})" },
         Regex("""^打不开这个文件：(.*)$""") to { m -> "Can't open this file: ${m.groupValues[1]}" },
