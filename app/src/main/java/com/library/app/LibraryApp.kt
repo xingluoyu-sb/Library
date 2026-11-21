@@ -16,6 +16,9 @@ class LibraryApp : Application() {
         com.library.app.i18n.Lang.init(this)
         // 回收站只在启动时清一次过期内容，不值得为它起常驻任务
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            // 老版本的密码用的是 Keystore 密钥直接加密，换机解不开，
+            // 这里统一改写成「数据密钥」加密；幂等，跑多少次都没关系
+            runCatching { container.secretCrypto.migrateLegacyCiphertext() }
             runCatching { container.repository.purgeTrash() }
             // 早期同步 bug 会留下同层同名的文件夹，启动时顺手合并掉
             runCatching { container.repository.dedupeFolders() }

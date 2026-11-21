@@ -19,8 +19,11 @@ class AppDatabase(context: Context) :
          * 5 → 6：entries 加 deleted_at，删除改成进回收站（软删除），30 天后才真删。
          * 6 → 7：entries 加 trash_path。删文件时把内容先搬进 App 私有回收站目录，
          *        原位置的文件照旧删掉，30 天内可以从回收站写回去。
+         * 7 → 8：新增 crypto_keys，存「用设备密钥包起来的数据密钥（DEK）」和 crypto_version。
+         *        crypto_version = 1 表示 entries.secret_ct 还是老的 Keystore 密文，
+         *        = 2 表示已经全部换成 DEK 密文。读取路径只看这个值，不靠试解密。
          */
-        const val VERSION = 7
+        const val VERSION = 8
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -90,6 +93,18 @@ object Migrations {
         },
         6 to { db ->
             db.execSQL("ALTER TABLE entries ADD COLUMN trash_path TEXT")
+        },
+        7 to { db ->
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS crypto_keys (
+                    id             INTEGER PRIMARY KEY CHECK (id = 1),
+                    wrapped_dek    TEXT    NOT NULL,
+                    crypto_version INTEGER NOT NULL DEFAULT 1,
+                    created_at     INTEGER NOT NULL
+                )
+                """.trimIndent(),
+            )
         },
     )
 

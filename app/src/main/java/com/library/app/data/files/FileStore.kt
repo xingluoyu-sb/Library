@@ -1,6 +1,5 @@
 package com.library.app.data.files
 
-import android.content.ContentValues
 import android.provider.DocumentsContract
 import android.content.Context
 import android.content.Intent
@@ -84,31 +83,6 @@ class FileStore(private val context: Context) {
                 resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }.isSuccess
     }
-
-    /** 把数据库文件复制一份到 library 目录，方便自己拿出来或换机。 */
-    fun backupDatabase(): String? = runCatching {
-        val dbFile = context.getDatabasePath("library.db")
-        if (!dbFile.exists()) return null
-        val name = "library-${System.currentTimeMillis()}.db"
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, rootLabel())
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        val target = resolver.insert(collection, values) ?: return null
-        resolver.openOutputStream(target)?.use { output ->
-            dbFile.inputStream().use { it.copyTo(output) }
-        }
-        resolver.update(
-            target,
-            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-            null,
-            null,
-        )
-        name
-    }.getOrNull()
 
 }
 

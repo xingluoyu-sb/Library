@@ -88,6 +88,11 @@ fun SettingsScreen(
     var verifying by remember { mutableStateOf(false) }
     var verifyError by remember { mutableStateOf<String?>(null) }
     var deviceUnavailable by remember { mutableStateOf(false) }
+    var exportOpen by remember { mutableStateOf(false) }
+    var wantPassphrase by remember { mutableStateOf<android.net.Uri?>(null) }
+    var restorePass by remember { mutableStateOf<String?>(null) }
+    var restorePlain by remember { mutableStateOf(false) }
+    var backupBusy by remember { mutableStateOf(false) }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
         trashCount = repository.trashCount()
@@ -118,7 +123,24 @@ fun SettingsScreen(
 
     val restorePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
-    ) { uri -> if (uri != null) pendingRestore = uri }
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            backupBusy = true
+            val kind = backupManager.kindOf(uri)
+            backupBusy = false
+            when (kind) {
+                // 加密备份先问口令，问完再让用户确认覆盖
+                BackupManager.Kind.ENCRYPTED -> wantPassphrase = uri
+                BackupManager.Kind.PLAIN -> {
+                    restorePlain = true
+                    restorePass = null
+                    pendingRestore = uri
+                }
+                BackupManager.Kind.UNKNOWN -> backupMessage = "读不到这个文件".tr()
+            }
+        }
+    }
 
     Scaffold(
         topBar = { LibraryTopBar(title = "设置".tr(), onBack = onBack) },
@@ -308,19 +330,16 @@ fun SettingsScreen(
 
             ActionRow(
                 icon = AppIcons.Doc,
-                title = "备份数据".tr(),
-                subtitle = backupMessage ?: "导出一份数据库副本到这个目录".tr(),
+                title = "导出备份".tr(),
+                subtitle = backupMessage ?: "用口令加密后存到上面的目录".tr(),
                 tint = MaterialTheme.colorScheme.primary,
-                onClick = {
-                    val name = fileStore.backupDatabase()
-                    backupMessage = if (name == null) "备份失败".tr() else "已保存 $name".tr()
-                },
+                onClick = { if (!backupBusy) exportOpen = true },
             )
 
             ActionRow(
                 icon = AppIcons.Archive,
                 title = "从备份恢复".tr(),
-                subtitle = "选一个之前导出的 .db 文件，覆盖当前数据".tr(),
+                subtitle = backupMessage ?: "选一个 .libbak 备份，覆盖当前数据".tr(),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { restorePicker.launch(arrayOf("*/*")) },
             )
@@ -392,19 +411,65 @@ fun SettingsScreen(
     pendingRestore?.let { uri ->
         ConfirmDialog(
             title = "用备份覆盖当前数据？".tr(),
-            message = "当前所有资料库、文件夹和密码都会被这个备份里的内容替换，不能撤销。".tr(),
+            message = if (restorePlain) {
+                "这是旧版明文备份：记录和资料条目能回来，里面的密码在这台手机上解不开。当前所有内容都会被替换，不能撤销。".tr()
+            } else {
+                "当前所有资料库、文件夹和密码都会被这份备份替换，不能撤销。".tr()
+            },
             confirmText = "覆盖".tr(),
             onConfirm = {
+                val pass = restorePass
                 pendingRestore = null
                 scope.launch {
-                    when (val outcome = backupManager.restoreFrom(uri)) {
+                    backupBusy = true
+                    when (val outcome = backupManager.restoreFrom(uri, pass)) {
                         BackupManager.Restore.Ok -> restored = true
                         is BackupManager.Restore.Failed ->
                             backupMessage = "恢复失败：${outcome.reason}".tr()
                     }
+                    backupBusy = false
                 }
             },
             onDismiss = { pendingRestore = null },
+        )
+    }
+
+    if (exportOpen) {
+        PassphraseDialog(
+            title = "设置备份口令".tr(),
+            message = "备份会用一个口令加密，8 位以上。口令不写进任何地方，忘了这份备份就打不开。".tr(),
+            confirmText = "导出".tr(),
+            withConfirm = true,
+            onCancel = { exportOpen = false },
+            onConfirm = { pass ->
+                exportOpen = false
+                scope.launch {
+                    backupBusy = true
+                    backupMessage = "正在导出…".tr()
+                    when (val outcome = backupManager.exportEncrypted(pass)) {
+                        is BackupManager.Export.Ok -> backupMessage = "已保存 ${outcome.name}".tr()
+                        is BackupManager.Export.Failed ->
+                            backupMessage = "备份失败：${outcome.reason}".tr()
+                    }
+                    backupBusy = false
+                }
+            },
+        )
+    }
+
+    wantPassphrase?.let { uri ->
+        PassphraseDialog(
+            title = "输入备份口令".tr(),
+            message = "这份备份是加密的，需要当时设置的口令。".tr(),
+            confirmText = "继续".tr(),
+            withConfirm = false,
+            onCancel = { wantPassphrase = null },
+            onConfirm = { pass ->
+                wantPassphrase = null
+                restorePass = pass
+                restorePlain = false
+                pendingRestore = uri
+            },
         )
     }
 
@@ -602,4 +667,126 @@ private fun ActionRow(
             )
         }
     }
+}
+
+/**
+ * 收口令的小弹窗。withConfirm=true 时要求输两遍（导出用），
+ * false 时只输一遍（恢复时验证口令用）。
+ */
+@Composable
+private fun PassphraseDialog(
+    title: String,
+    message: String,
+    confirmText: String,
+    withConfirm: Boolean,
+    onCancel: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var value by remember { mutableStateOf("") }
+    var again by remember { mutableStateOf("") }
+    var visible by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val min = BackupManager.MIN_PASSPHRASE
+
+    fun submit() {
+        if (!withConfirm) {
+            if (value.isBlank()) {
+                error = "先输入口令".tr()
+                return
+            }
+            onConfirm(value)
+            return
+        }
+        error = when {
+            value.length < min -> "口令至少 $min 位".tr()
+            value != again -> "两次输入不一致".tr()
+            else -> null
+        }
+        if (error == null) onConfirm(value)
+    }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = {
+                        value = it
+                        error = null
+                    },
+                    label = { Text(if (withConfirm) "口令".tr() else "备份口令".tr()) },
+                    singleLine = true,
+                    visualTransformation = if (visible) {
+                        androidx.compose.ui.text.input.VisualTransformation.None
+                    } else {
+                        androidx.compose.ui.text.input.PasswordVisualTransformation()
+                    },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                        imeAction = if (withConfirm) {
+                            androidx.compose.ui.text.input.ImeAction.Next
+                        } else {
+                            androidx.compose.ui.text.input.ImeAction.Done
+                        },
+                    ),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onDone = { submit() },
+                    ),
+                    trailingIcon = {
+                        TextButton(onClick = { visible = !visible }) {
+                            Text(if (visible) "隐藏".tr() else "显示".tr())
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (withConfirm) {
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = again,
+                        onValueChange = {
+                            again = it
+                            error = null
+                        },
+                        label = { Text("再次输入".tr()) },
+                        singleLine = true,
+                        visualTransformation = if (visible) {
+                            androidx.compose.ui.text.input.VisualTransformation.None
+                        } else {
+                            androidx.compose.ui.text.input.PasswordVisualTransformation()
+                        },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                            imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+                        ),
+                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                            onDone = { submit() },
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                error?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { submit() }) { Text(confirmText) }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("取消".tr()) }
+        },
+    )
 }

@@ -1,6 +1,7 @@
 package com.library.app.data
 
 import android.content.Context
+import com.library.app.data.crypto.DataKey
 import com.library.app.data.crypto.SecretCrypto
 import com.library.app.data.db.AppDatabase
 import com.library.app.data.files.BackupManager
@@ -15,10 +16,13 @@ class AppContainer(context: Context) {
     val fileStore: FileStore by lazy { FileStore(appContext) }
     val trashStore: TrashStore by lazy { TrashStore(appContext, fileStore) }
     val repository: Repository by lazy { Repository(database, fileStore, trashStore) }
-    val secretCrypto: SecretCrypto by lazy { SecretCrypto(appContext) }
+    val dataKey: DataKey by lazy { DataKey(appContext, database) }
+    val secretCrypto: SecretCrypto by lazy { SecretCrypto(appContext, database, dataKey) }
     val folderImporter: FolderImporter by lazy { FolderImporter(appContext, repository) }
     val importRunner: ImportRunner by lazy { ImportRunner(folderImporter) }
-    val backupManager: BackupManager by lazy { BackupManager(appContext, database) }
+    val backupManager: BackupManager by lazy {
+        BackupManager(appContext, database, dataKey, fileStore)
+    }
     val branding: BrandingStore by lazy { BrandingStore(appContext) }
     val security: SecurityPrefs by lazy { SecurityPrefs(appContext) }
     val sortPrefs: SortPrefs by lazy { SortPrefs(appContext) }

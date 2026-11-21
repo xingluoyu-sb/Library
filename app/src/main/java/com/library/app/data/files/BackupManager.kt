@@ -1,5 +1,6 @@
 package com.library.app.data.files
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
@@ -7,87 +8,55 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.provider.MediaStore
+import com.library.app.data.crypto.BackupCodec
+import com.library.app.data.crypto.DataKey
 import com.library.app.data.db.AppDatabase
+import com.library.app.i18n.tr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
- * 备份的「另一半」：能导出也要能导回来。
+ * 备份与恢复。
  *
- * 恢复是整库替换，所以必须先关连接、删掉 -wal/-shm，再把文件盖上去；
- * 盖完内存里那些 DAO 还指着旧文件，只能重启进程，没有别的干净做法。
+ * 导出的是加密容器 `.libbak`（见 [BackupCodec]），不是裸的 `.db`：
+ * 记录正文、条目名、平台账号都经过口令派生的密钥加密，容器里还带着用同一口令包住的
+ * 数据密钥，所以换手机恢复后密码条目照样能解开。
+ *
+ * 恢复兼容两种文件：老的明文 `.db`（密码无法解密）和新的 `.libbak`。
+ * 整库替换必须：关连接 → 删 -wal/-shm → 覆盖 → fsync → 重启进程，
+ * 中间任何一步失败都保留原库不动。
  */
 class BackupManager(
     private val context: Context,
     private val database: AppDatabase,
+    private val dataKey: DataKey,
+    private val fileStore: FileStore,
 ) {
+
+    sealed interface Export {
+        data class Ok(val name: String) : Export
+        data class Failed(val reason: String) : Export
+    }
 
     sealed interface Restore {
         data object Ok : Restore
         data class Failed(val reason: String) : Restore
     }
 
-    suspend fun restoreFrom(uri: Uri): Restore = withContext(Dispatchers.IO) {
-        val temp = File(context.cacheDir, "restore.db")
-        temp.delete()
-
-        val stream = runCatching { context.contentResolver.openInputStream(uri) }.getOrNull()
-            ?: return@withContext Restore.Failed("读不到这个文件")
-
-        runCatching {
-            stream.use { input -> temp.outputStream().use { output -> input.copyTo(output) } }
-        }.onFailure { return@withContext Restore.Failed("复制失败：${it.brief()}") }
-
-        if (!temp.exists() || temp.length() == 0L) {
-            temp.delete()
-            return@withContext Restore.Failed("文件是空的")
-        }
-
-        val problem = validate(temp)
-        if (problem != null) {
-            temp.delete()
-            return@withContext Restore.Failed(problem)
-        }
-
-        runCatching {
-            // 先放掉连接，否则盖过去的文件会被旧句柄继续用
-            database.close()
-            val target = context.getDatabasePath(AppDatabase.NAME)
-            target.parentFile?.mkdirs()
-            File(target.path + "-wal").delete()
-            File(target.path + "-shm").delete()
-            temp.copyTo(target, overwrite = true)
-            temp.delete()
-        }.fold(
-            onSuccess = { Restore.Ok },
-            onFailure = { Restore.Failed("写入失败：${it.brief()}，请重启应用再试") },
-        )
-    }
-
-    /** 返回 null 表示没问题，否则是给人看的原因。 */
-    private fun validate(file: File): String? = runCatching {
-        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-            val version = db.version
-            if (version !in 1..AppDatabase.VERSION) {
-                return "这个备份是 v$version，当前只认 v1–v${AppDatabase.VERSION}"
-            }
-            val tables = HashSet<String>()
-            db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'", null).use { cursor ->
-                while (cursor.moveToNext()) tables.add(cursor.getString(0))
-            }
-            val missing = listOf("modules", "folders", "entries").filterNot(tables::contains)
-            if (missing.isNotEmpty()) {
-                return "不像是资料库的备份（缺 ${missing.joinToString()}）"
-            }
-        }
-        null
-    }.getOrElse { "打不开这个文件：${it.brief()}" }
-
-    private fun Throwable.brief(): String = message?.takeIf { it.isNotBlank() } ?: javaClass.simpleName
+    enum class Kind { ENCRYPTED, PLAIN, UNKNOWN }
 
     companion object {
-        /** 重启自己：先把新实例拉起来，再杀掉旧进程。 */
+        const val EXTENSION = "libbak"
+        const val MIN_PASSPHRASE = 8
+
+        /** 重启自己：先把新实例拉起来，再杀掉旧进程，避免同一进程里重开 DAO。 */
         fun restart(context: Context) {
             val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
                 ?.apply {
@@ -100,4 +69,167 @@ class BackupManager(
             )
         }
     }
+
+    /** 先看文件头，界面据此决定要不要问口令。 */
+    suspend fun kindOf(uri: Uri): Kind = withContext(Dispatchers.IO) {
+        val head = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val buffer = ByteArray(8)
+                val read = input.read(buffer)
+                if (read > 0) buffer.copyOf(read) else ByteArray(0)
+            }
+        }.getOrNull() ?: return@withContext Kind.UNKNOWN
+
+        if (BackupCodec.looksLikeBackup(head)) Kind.ENCRYPTED else Kind.PLAIN
+    }
+
+    suspend fun exportEncrypted(passphrase: String): Export = withContext(Dispatchers.IO) {
+        if (passphrase.length < MIN_PASSPHRASE) {
+            return@withContext Export.Failed("口令至少 $MIN_PASSPHRASE 位".tr())
+        }
+        runCatching {
+            // WAL 里没落盘的内容先并进主文件，否则最近改的东西不会进备份
+            database.writableDatabase.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null)
+                .use { it.moveToFirst() }
+
+            val dbFile = context.getDatabasePath(AppDatabase.NAME)
+            if (!dbFile.exists()) throw IOException("还没有数据库".tr())
+
+            val resolver = context.contentResolver
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+            val name = "library-$stamp.$EXTENSION"
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, fileStore.rootLabel())
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val target = resolver.insert(
+                MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                values,
+            ) ?: throw IOException("写不进备份目录".tr())
+
+            try {
+                resolver.openOutputStream(target)?.use { out ->
+                    BackupCodec.encodeTo(out, dbFile, dataKey.key(), passphrase)
+                } ?: throw IOException("写不进备份目录".tr())
+                resolver.update(
+                    target,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null,
+                    null,
+                )
+                name
+            } catch (t: Throwable) {
+                // 失败就删掉半截文件，别在目录里留一个打不开的东西
+                runCatching { resolver.delete(target, null, null) }
+                throw t
+            }
+        }.fold(
+            onSuccess = { Export.Ok(it) },
+            onFailure = { Export.Failed(it.brief()) },
+        )
+    }
+
+    /** [passphrase] 为空表示这是老的明文 `.db`。 */
+    suspend fun restoreFrom(uri: Uri, passphrase: String? = null): Restore = withContext(Dispatchers.IO) {
+        val incoming = File(context.cacheDir, "backup-in.tmp")
+        val decrypted = File(context.cacheDir, "backup-out.db")
+        try {
+            incoming.delete()
+            decrypted.delete()
+
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(incoming).use { output -> input.copyTo(output, 64 * 1024) }
+                } ?: throw IOException("读不到这个文件".tr())
+            }.onFailure { return@withContext Restore.Failed("读不到这个文件".tr()) }
+
+            if (!incoming.exists() || incoming.length() == 0L) {
+                return@withContext Restore.Failed("文件是空的".tr())
+            }
+
+            val encrypted = incoming.inputStream().use { input ->
+                val head = ByteArray(8)
+                val read = input.read(head)
+                BackupCodec.looksLikeBackup(if (read > 0) head.copyOf(read) else ByteArray(0))
+            }
+
+            val source: File
+            var dek: ByteArray? = null
+            if (encrypted) {
+                if (passphrase.isNullOrEmpty()) return@withContext Restore.Failed("这份备份需要口令".tr())
+                dek = runCatching {
+                    incoming.inputStream().use { BackupCodec.decodeTo(it, decrypted, passphrase) }
+                }.getOrElse { error ->
+                    return@withContext Restore.Failed(
+                        when (error) {
+                            is BackupCodec.WrongPassphrase -> "口令不对，或者备份已经损坏".tr()
+                            is BackupCodec.NotBackupFile -> "不像是资料库的备份".tr()
+                            is BackupCodec.Damaged -> "备份文件不完整".tr()
+                            else -> "解不开这份备份：${error.brief()}".tr()
+                        },
+                    )
+                }
+                source = decrypted
+            } else {
+                source = incoming
+            }
+
+            validate(source)?.let { return@withContext Restore.Failed(it) }
+
+            return@withContext runCatching {
+                replaceDatabase(source)
+                if (dek != null) {
+                    SQLiteDatabase.openDatabase(
+                        context.getDatabasePath(AppDatabase.NAME).path,
+                        null,
+                        SQLiteDatabase.OPEN_READWRITE,
+                    ).use { dataKey.adoptInto(it, dek) }
+                }
+                Restore.Ok
+            }.getOrElse { Restore.Failed("写入失败：${it.brief()}，请重启应用再试".tr()) }
+        } finally {
+            // 明文数据库的临时副本必须在这里清掉，失败路径也不能留
+            incoming.delete()
+            decrypted.delete()
+        }
+    }
+
+    private fun replaceDatabase(source: File) {
+        // 先放掉连接，否则旧句柄还会继续写老文件
+        database.close()
+        val target = context.getDatabasePath(AppDatabase.NAME)
+        target.parentFile?.mkdirs()
+        File(target.path + "-wal").delete()
+        File(target.path + "-shm").delete()
+        source.inputStream().use { input ->
+            FileOutputStream(target).use { output ->
+                input.copyTo(output, 64 * 1024)
+                output.flush()
+                output.fd.sync()
+            }
+        }
+    }
+
+    /** 返回 null 表示没问题，否则是给人看的原因。 */
+    private fun validate(file: File): String? = runCatching {
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            val version = db.version
+            if (version !in 1..AppDatabase.VERSION) {
+                return "这个备份是 v$version，当前只认 v1–v${AppDatabase.VERSION}".tr()
+            }
+            val tables = HashSet<String>()
+            db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'", null).use { cursor ->
+                while (cursor.moveToNext()) tables.add(cursor.getString(0))
+            }
+            val missing = listOf("modules", "folders", "entries").filterNot(tables::contains)
+            if (missing.isNotEmpty()) {
+                return "不像是资料库的备份（缺 ${missing.joinToString()}）".tr()
+            }
+        }
+        null
+    }.getOrElse { "打不开这个文件：${it.brief()}".tr() }
+
+    private fun Throwable.brief(): String = message?.takeIf { it.isNotBlank() } ?: javaClass.simpleName
 }

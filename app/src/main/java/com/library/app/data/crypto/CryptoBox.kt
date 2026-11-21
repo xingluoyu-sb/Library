@@ -50,16 +50,24 @@ class CryptoBox(private val context: Context) {
     }
 
     /** 加密，返回 `v1:` + Base64(iv || ciphertext)。 */
-    fun encrypt(plain: String): String {
+    fun encrypt(plain: String): String = encryptBytes(plain.toByteArray(Charsets.UTF_8), AAD_LEGACY)
+
+    fun decrypt(blob: String): String = decryptBytes(blob, AAD_LEGACY).toString(Charsets.UTF_8)
+
+    /**
+     * 字节版：用来包「数据密钥」这种本来就是二进制的材料。
+     * [aad] 必须按用途区分（包 DEK 和包密文用不同值），传错就解不开，这是有意的。
+     */
+    fun encryptBytes(data: ByteArray, aad: ByteArray = AAD_LEGACY): String {
         val cipher = Cipher.getInstance(TRANSFORMATION).apply {
             init(Cipher.ENCRYPT_MODE, secretKey())
-            updateAAD(AAD)
+            updateAAD(aad)
         }
-        val body = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+        val body = cipher.doFinal(data)
         return PREFIX + Base64.encodeToString(cipher.iv + body, Base64.NO_WRAP)
     }
 
-    fun decrypt(blob: String): String {
+    fun decryptBytes(blob: String, aad: ByteArray = AAD_LEGACY): ByteArray {
         require(blob.startsWith(PREFIX)) { "密文格式不对" }
         val raw = Base64.decode(blob.removePrefix(PREFIX), Base64.NO_WRAP)
         require(raw.size > IV_SIZE) { "密文长度不足" }
@@ -67,9 +75,9 @@ class CryptoBox(private val context: Context) {
         val body = raw.copyOfRange(IV_SIZE, raw.size)
         val cipher = Cipher.getInstance(TRANSFORMATION).apply {
             init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(TAG_BITS, iv))
-            updateAAD(AAD)
+            updateAAD(aad)
         }
-        return cipher.doFinal(body).toString(Charsets.UTF_8)
+        return cipher.doFinal(body)
     }
 
     private fun secretKey(): SecretKey = keyStore.getKey(ALIAS, null) as SecretKey
@@ -82,6 +90,7 @@ class CryptoBox(private val context: Context) {
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val IV_SIZE = 12
         private const val TAG_BITS = 128
-        private val AAD = "library-v1".toByteArray(Charsets.UTF_8)
+        /** 历史值，老密文都用它做 AAD，不能改。 */
+        private val AAD_LEGACY = "library-v1".toByteArray(Charsets.UTF_8)
     }
 }

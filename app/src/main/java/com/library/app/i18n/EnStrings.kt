@@ -9,6 +9,33 @@ package com.library.app.i18n
 object EnStrings {
 
     val map: Map<String, String> = mapOf(
+        // 备份与恢复
+        "导出备份" to "Export backup",
+        "用口令加密后存到上面的目录" to "Encrypted with a passphrase, saved to the folder above",
+        "选一个 .libbak 备份，覆盖当前数据" to "Pick a .libbak backup to replace current data",
+        "这是旧版明文备份：记录和资料条目能回来，里面的密码在这台手机上解不开。当前所有内容都会被替换，不能撤销。" to
+            "This is an old unencrypted backup: notes and library items come back, but its passwords can't be decrypted on this phone. Everything currently here will be replaced. This can't be undone.",
+        "设置备份口令" to "Set a backup passphrase",
+        "备份会用一个口令加密，8 位以上。口令不写进任何地方，忘了这份备份就打不开。" to
+            "The backup is encrypted with a passphrase of 8+ characters. It isn't stored anywhere — forget it and the backup can't be opened.",
+        "口令" to "Passphrase",
+        "备份口令" to "Backup passphrase",
+        "隐藏" to "Hide",
+        "显示" to "Show",
+        "两次输入不一致" to "The two entries don't match",
+        "先输入口令" to "Enter the passphrase first",
+        "输入备份口令" to "Enter backup passphrase",
+        "这份备份是加密的，需要当时设置的口令。" to "This backup is encrypted — it needs the passphrase you set back then.",
+        "正在导出…" to "Exporting…",
+        "还没有数据库" to "No database yet",
+        "写不进备份目录" to "Couldn't write to the backup folder",
+        "文件太大，不像是备份" to "File is too large to be a backup",
+        "读不到这个文件" to "Couldn't read this file",
+        "文件是空的" to "The file is empty",
+        "这份备份需要口令" to "This backup needs a passphrase",
+        "备份文件不完整" to "The backup file is incomplete",
+        "不像是资料库的备份" to "This doesn't look like a library backup",
+        "口令不对，或者备份已经损坏" to "Wrong passphrase, or the backup is damaged",
         // 通用
         "确定" to "OK",
         "取消" to "Cancel",
@@ -363,5 +390,14 @@ object EnStrings {
             "The system decoder can't play this video (${m.groupValues[1]}/${m.groupValues[2]}). Try another app from the top-right."
         },
         Regex("""^打不开这个视频：(.*)$""") to { m -> "Can't play this video: ${m.groupValues[1]}" },
+        Regex("""^口令至少 (\d+) 位$""") to { m -> "At least ${m.groupValues[1]} characters" },
+        Regex("""^备份失败：(.*)$""") to { m -> "Backup failed: ${m.groupValues[1]}" },
+        Regex("""^解不开这份备份：(.*)$""") to { m -> "Couldn't open this backup: ${m.groupValues[1]}" },
+        Regex("""^写入临时文件失败：(.*)$""") to { m -> "Couldn't write the temporary file: ${m.groupValues[1]}" },
+        Regex("""^写入失败：(.*)，请重启应用再试$""") to { m -> "Write failed: ${m.groupValues[1]}. Please restart the app and retry." },
+        Regex("""^这个备份是 v(\d+)，当前只认 v1–v(\d+)$""") to { m -> "This backup is v${m.groupValues[1]}; only v1–v${m.groupValues[2]} is supported" },
+        Regex("""^不像是资料库的备份（缺 (.*)）$""") to { m -> "Doesn't look like a library backup (missing ${m.groupValues[1]})" },
+        Regex("""^打不开这个文件：(.*)$""") to { m -> "Can't open this file: ${m.groupValues[1]}" },
+
     )
 }

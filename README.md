@@ -36,11 +36,12 @@
 
 **密码**
 - 按平台分组保存账号密码，一键复制
-- 密码本体经 **AES-GCM** 加密后入库，密钥存在 **Android Keystore**，数据库里没有明文
+- 密码本体经 **AES-GCM** 加密后入库，密钥是随机生成的「数据密钥」：
+  平时用 Android Keystore 把它包起来存本机，导出备份时再用你的口令包一层，所以备份换机解得开
 
 **通用**
 - 回收站：删除先留副本，可原样恢复回原目录
-- 备份：把数据库导出成一份 `.db` 副本；也能从副本恢复
+- 备份：导出**口令加密**的 `.libbak`（里面带着用口令包起来的数据密钥），换机也能把密码一起恢复
 - 上锁：应用密码（PBKDF2-HMAC-SHA256，12 万轮，只存盐和派生值）或调用手机自带的指纹 / 锁屏密码
 - 中文 / English 双语，首次启动有引导
 
@@ -48,6 +49,18 @@
 
 1. **不联网。** 应用没有任何网络权限，也没有一行联网代码。数据不外流，代价是没有云同步——备份和恢复都靠你自己选目录。
 2. **导入不动源文件。** 应用保存的是文件的位置（SAF 授权），不是副本。所以照片还在相册里、视频还在下载文件夹里。反过来说，源文件被删掉或被移走，索引就会失效——这是这个设计必然的代价。
+
+## 加密是怎么做的
+
+- **密码字段**：AES-256-GCM，密钥是一段 32 字节随机「数据密钥」（DEK），AAD 固定 `secret-v2`
+- **DEK 不落明文**：平时用 Android Keystore 里的密钥包一层存进 `crypto_keys`（AAD `dek-v1`）；
+  导出备份时再用「备份口令」派生的密钥包一层，随容器一起走
+- **版本只有一处真相**：`crypto_version` = 1 表示还是老的 Keystore 直加密文，2 表示已全量换成 DEK。
+  读取路径只看这个值，密文前缀对不上就报错，不做「解不开换一种试试」
+- **迁移是一次性的整表操作**：读旧行、改写、提交版本号在同一个 SQLite 事务里，任何一行失败整表回滚；
+  Keystore 里的旧密钥一直保留，不删
+- **备份容器**：`LIBK1 | 版本 | PBKDF2 轮数 | salt(16) | iv(12) | AES-GCM 密文 + tag`，
+  明文内容 = DEK + 数据库字节。口令不写进文件，也不等于锁屏口令
 
 ## 构建
 
@@ -62,6 +75,14 @@ cp keystore.properties.example keystore.properties   # 然后填上自己的 key
 ./gradlew :app:assembleRelease
 ```
 
+跑测试：
+
+```bash
+./gradlew :app:testDebugUnitTest
+```
+
+覆盖加解密往返、IV 不重复、AAD 不匹配即失败、容器错口令/篡改/截断、迁移整批全成或全不改写等 21 个用例。
+
 Windows 下也可以直接双击 `build.bat`（用的是系统里的 `JAVA_HOME` / `ANDROID_HOME`）。
 
 `keystore.properties` 和 `keystore/` 已被 `.gitignore` 排除，自己的签名材料不会误传。
@@ -74,7 +95,7 @@ app/src/main/java/com/library/app/
 │   ├── db/          Schema + SQLiteOpenHelper 手写迁移（当前 version 7）
 │   ├── dao/         Entry / Folder / Module 的 SQL
 │   ├── files/       FileStore、FolderImporter、TrashStore、BackupManager
-│   ├── crypto/      CryptoBox（AES-GCM + Keystore）、BiometricGate
+│   ├── crypto/      CryptoBox（Keystore）、DataKey（数据密钥）、BackupCodec（加密备份容器）
 │   ├── AppLock.kt   应用密码 / 手机凭证
 │   └── Repository.kt  业务入口
 ├── ui/
@@ -89,9 +110,10 @@ app/src/main/java/com/library/app/
 ## 已知限制
 
 - 只有 Android（minSdk 30），没有 iOS / 桌面版
-- 没有云同步，多设备之间只能靠导出的 `.db` 手动搬
+- 没有云同步，多设备之间只能靠导出的 `.libbak` 手动搬（需要记住备份口令）
 - 索引依赖系统给目录的持久授权，卸载重装后需要重新导入
 - 忘记应用密码只能在验证手机凭证后重设；数据不会丢，但密码框本身没有「找回」通道
+- 忘记**备份口令**这份备份就打不开了：口令不落盘，没有任何后门
 
 ## 协议
 

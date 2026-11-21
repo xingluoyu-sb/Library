@@ -12,6 +12,7 @@ object Schema {
     const val TABLE_TAGS = "tags"
     const val TABLE_ENTRY_TAGS = "entry_tags"
     const val TABLE_SETTINGS = "settings"
+    const val TABLE_CRYPTO_KEYS = "crypto_keys"
 
     val CREATE: List<String> = listOf(
 
@@ -88,6 +89,15 @@ object Schema {
         CREATE TABLE settings (
             key         TEXT PRIMARY KEY,
             value       TEXT
+        )
+        """.trimIndent(),
+
+        """
+        CREATE TABLE crypto_keys (
+            id             INTEGER PRIMARY KEY CHECK (id = 1),
+            wrapped_dek    TEXT    NOT NULL,
+            crypto_version INTEGER NOT NULL DEFAULT 1,
+            created_at     INTEGER NOT NULL
         )
         """.trimIndent(),
 
