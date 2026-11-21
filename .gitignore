@@ -1,0 +1,36 @@
+# ---- Android / Gradle ----
+.gradle/
+build/
+app/build/
+local.properties
+captures/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ---- 签名材料（绝不入库）----
+keystore/
+keystore.properties
+*.jks
+*.keystore
+
+# ---- IDE ----
+.idea/
+*.iml
+*.hprof
+.kotlin/
+
+# ---- 本机专用脚本 ----
+build.local.bat
+
+# ---- 本机调试残留 ----
+shots/
+.tools/
+.backup_java_*/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+*.log

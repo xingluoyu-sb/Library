@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">资料库</string>
+
+    <string name="lock_title">资料库已锁定</string>
+    <string name="lock_subtitle">验证指纹或锁屏密码后查看内容</string>
+    <string name="lock_action">点击验证</string>
+    <string name="lock_hint">也可使用手机锁屏密码</string>
+    <string name="lock_no_secure">请先在系统设置中设置锁屏密码，否则无法保护资料</string>
+    <string name="lock_readonly">进入只读模式</string>
+    <string name="lock_cancelled">已取消验证</string>
+
+    <string name="home_title">资料库</string>
+    <string name="home_empty">还没有模块\n点右下角新建一个，比如「密码」「计划」</string>
+    <string name="home_new_module">新建模块</string>
+
+    <string name="action_search">搜索</string>
+    <string name="action_settings">设置</string>
+    <string name="action_back">返回</string>
+    <string name="action_more">更多</string>
+    <string name="action_save">保存</string>
+    <string name="action_cancel">取消</string>
+    <string name="action_delete">删除</string>
+    <string name="action_rename">重命名</string>
+    <string name="action_confirm">确定</string>
+
+    <string name="module_empty">这里还是空的\n可以新建文件夹，或直接加一条资料</string>
+    <string name="new_folder">新建文件夹</string>
+    <string name="new_entry_password">密码</string>
+    <string name="new_entry_checklist">清单</string>
+    <string name="new_entry_note">长文</string>
+
+    <string name="editor_title_new">新建</string>
+    <string name="editor_title_edit">编辑</string>
+    <string name="editor_type_password">密码</string>
+    <string name="editor_type_checklist">清单</string>
+    <string name="editor_type_note">长文</string>
+    <string name="editor_field_title">标题</string>
+    <string name="editor_field_account">账号</string>
+    <string name="editor_field_secret">密码</string>
+    <string name="editor_field_url">网址</string>
+    <string name="editor_field_body">内容</string>
+    <string name="editor_field_note">备注</string>
+    <string name="editor_add_item">添加一项</string>
+    <string name="editor_need_title">请先填写标题</string>
+
+    <string name="search_hint">搜索标题、账号、内容</string>
+    <string name="search_empty">输入关键词开始搜索</string>
+
+    <string name="settings_title">设置</string>
+    <string name="settings_version">版本</string>
+    <string name="settings_key_state">加密密钥</string>
+    <string name="settings_clear">清空全部数据</string>
+    <string name="settings_clear_hint">此操作不可撤销</string>
+</resources>
