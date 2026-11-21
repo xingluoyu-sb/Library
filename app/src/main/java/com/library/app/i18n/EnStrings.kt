@@ -32,6 +32,8 @@ object EnStrings {
         "文件太大，不像是备份" to "File is too large to be a backup",
         "读不到这个文件" to "Couldn't read this file",
         "文件是空的" to "The file is empty",
+        "没能留下回滚副本，为了不动原库，这次没有恢复" to
+            "Couldn't save a rollback copy, so nothing was restored and the original library was left untouched",
         "这份备份需要口令" to "This backup needs a passphrase",
         "上次恢复没有完成" to "The last restore didn't finish",
         "资料库恢复了，但里面的密码是另一台手机的密钥加密的，这台机器打不开" to

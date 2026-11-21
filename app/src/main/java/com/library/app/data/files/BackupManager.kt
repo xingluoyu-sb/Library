@@ -73,6 +73,9 @@ class BackupManager(
         /** 覆盖原库之前留下的副本；恢复中途进程被杀，下次启动就靠它回退。 */
         private const val ROLLBACK_NAME = "restore-rollback.db"
 
+        /** 读不到 checkpoint 结果时按「没并成」处理，宁可放弃恢复也不拿缺料的副本充数。 */
+        private const val BUSY = 1
+
         /** 重启自己：先把新实例拉起来，再杀掉旧进程，避免同一进程里重开 DAO。 */
         fun restart(context: Context) {
             val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
@@ -265,8 +268,13 @@ class BackupManager(
                 }
             }
 
-            // ② 覆盖前把原库整份拷到 cacheDir，后面任何一步失败都能退回去
-            val haveRollback = copyDatabaseTo(rollback)
+            // ② 覆盖前把原库整份拷到 cacheDir，后面任何一步失败都能退回去。
+            //    留不下来就不能往下走：一旦写坏，原库和退路会一起没
+            val rollbackCopy = copyDatabaseTo(rollback)
+            if (rollbackCopy == RollbackCopy.FAILED) {
+                return@withContext Restore.Failed("没能留下回滚副本，为了不动原库，这次没有恢复".tr())
+            }
+            val haveRollback = rollbackCopy == RollbackCopy.SAVED
 
             runCatching {
                 replaceDatabase(source)
@@ -310,17 +318,22 @@ class BackupManager(
         }
     }
 
+    /** 覆盖前的回滚副本：留成了 / 本来就没有库 / 没留成。 */
+    private enum class RollbackCopy { SAVED, NOTHING, FAILED }
+
     /**
-     * 覆盖前留一份原库。先把 WAL 并进主文件，否则拷出来的副本会缺最近写入的内容。
-     * 返回 false 表示没留成（比如本来就没有库），调用方据此决定失败时怎么说。
+     * 覆盖前留一份原库。
+     *
+     * 拷之前必须先把 WAL 并进主文件，否则副本会缺最近写入的内容——那样「回滚成功」
+     * 也是个少半截数据的库。`PRAGMA wal_checkpoint` 的返回值是 (busy, log, checkpointed)，
+     * busy != 0 就说明有别的连接卡着没并完，重试一次，还不行就如实报失败。
      */
-    private fun copyDatabaseTo(target: File): Boolean = runCatching {
-        runCatching {
-            database.writableDatabase.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null)
-                .use { it.moveToFirst() }
-        }
+    private fun copyDatabaseTo(target: File): RollbackCopy = runCatching {
+        if (!checkpointWal()) return@runCatching RollbackCopy.FAILED
+
         val original = context.getDatabasePath(AppDatabase.NAME)
-        if (!original.exists()) return@runCatching false
+        if (!original.exists() || original.length() == 0L) return@runCatching RollbackCopy.NOTHING
+
         target.delete()
         original.inputStream().use { input ->
             FileOutputStream(target).use { output ->
@@ -329,8 +342,20 @@ class BackupManager(
                 output.fd.sync()
             }
         }
-        true
-    }.getOrDefault(false)
+        RollbackCopy.SAVED
+    }.getOrDefault(RollbackCopy.FAILED)
+
+    /** @return true 表示 WAL 已经干净地并进主文件 */
+    private fun checkpointWal(): Boolean {
+        repeat(2) {
+            val busy = runCatching {
+                database.writableDatabase.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null)
+                    .use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else BUSY }
+            }.getOrDefault(BUSY)
+            if (busy == 0) return true
+        }
+        return false
+    }
 
     private fun Throwable.restoreReason(): String =
         (this as? DataKey.DekUnavailable)?.message?.takeIf { it.isNotBlank() }
